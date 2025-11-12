@@ -1,0 +1,120 @@
+syntax = "proto3";
+
+package am;
+
+import "google/protobuf/empty.proto";
+
+message Principal {
+  string id = 1;
+}
+
+message CheckRequest {
+  string ns = 1;
+  string obj = 2;
+  string rel = 3;
+  string userId = 4;
+  string ts = 5;
+}
+
+message CheckResponse {
+  optional Principal principal = 1;
+  bool ok = 2;
+}
+
+message ContentChangeCheckRequest {
+  string ns = 1;
+  string obj = 2;
+  string rel = 3;
+  string userId = 4;
+}
+message ContentChangeCheckResponse {
+  bool ok = 2;
+  string ts = 3;
+}
+
+message ListRequest {
+  string ns = 1;
+  string rel = 3;
+  string userId = 4;
+  string ts = 5;
+}
+
+message ListResponse {
+  repeated string objs = 1;
+}
+
+service CheckService {
+  rpc check (CheckRequest) returns (CheckResponse);
+  rpc content_change_check (ContentChangeCheckRequest) returns (ContentChangeCheckResponse);
+  rpc list (ListRequest) returns (ListResponse);
+  rpc read (ReadRequest) returns (ReadResponse);
+  rpc write (WriteRequest) returns (WriteResponse);
+}
+
+
+message UserSet {
+  string ns = 1;
+  string obj = 2;
+  string rel = 3;
+}
+
+message Tuple {
+  string ns = 1;
+  string obj = 2;
+  string rel = 3;
+  oneof user {
+    string userId = 4;
+    UserSet userSet = 5;
+  }
+  oneof condition {
+    int64 expires = 6;
+  }
+}
+
+
+message TupleSet {
+  message TupleSpec {
+    string obj = 1;
+    string rel = 2;
+    oneof user {
+      string user_id = 3;
+      UserSet user_set = 4;
+    }
+  }
+  message ObjectSpec {
+    string obj = 1;
+    optional string rel = 2;
+  }
+  message UserSetSpec {
+    string user_set = 1;
+    optional string rel = 2;
+  }
+
+  string ns = 1;
+  oneof spec {
+    TupleSpec tuple_spec = 2;
+    ObjectSpec object_spec = 3;
+    //UserSetSpec userset_spec = 5;
+  }
+}
+
+message ReadRequest {
+  optional string ts = 1;
+  repeated TupleSet tuple_sets = 2;
+}
+
+message ReadResponse {
+  string ts = 1;
+  repeated Tuple tuples = 2;
+}
+
+message WriteRequest {
+  optional string ts = 1;
+  repeated Tuple add_tuples = 2;
+  repeated Tuple del_tuples = 3;
+}
+
+message WriteResponse {
+  string ts = 1;
+}
+
