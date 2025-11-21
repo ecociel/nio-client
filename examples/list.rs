@@ -1,5 +1,5 @@
-use check_client::{CheckClient, Namespace, Permission, UserId};
 use http::Uri;
+use nio_client::{CheckClient, Namespace, Permission, UserId};
 use std::env;
 
 fn perm(p: &str) -> Permission {

@@ -19,9 +19,9 @@
 //     CheckResult::UnknownPutativeUser => println!("unknown user {:?}", userid),
 // }
 
-use check_client::auth::CheckResult;
-use check_client::{CheckClient, Namespace, Obj, Permission, UserId};
 use http::Uri;
+use nio_client::auth::CheckResult;
+use nio_client::{CheckClient, Namespace, Obj, Permission, UserId};
 use std::env;
 
 fn perm(p: &str) -> Permission {

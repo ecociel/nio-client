@@ -33,8 +33,19 @@ tokio = { version = "1.0" }
 #tokio = { version = "1.0", features = ["macros", "rt-multi-thread", "signal"] }
 tonic = { version = "0.13.0" }
 
+[dev-dependencies]
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread", "signal"] }
+
 [features]
 default = []
 axum = ["dep:axum", "dep:axum-extra"]
 
+[[example]]
+name = "check"
+path = "examples/check.rs"
+required-features = ["axum"]
 
+[[example]]
+name = "list"
+path = "examples/list.rs"
+required-features = ["axum"]
