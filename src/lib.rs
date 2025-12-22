@@ -20,12 +20,81 @@ mod error;
 
 #[derive(Clone, Debug)]
 pub struct Namespace(pub String);
+const PERSONAL: &str = "personal";
+const ROOT: &str = "root";
+const TOKEN: &str = "token";
+const SERVICEACCOUNT_NS: &str = "serviceaccount";
+impl Namespace {
+    pub fn personal() -> Namespace {
+        Namespace(PERSONAL.into())
+    }
+    pub fn token() -> Namespace {
+        Namespace(TOKEN.into())
+    }
+    pub fn root() -> Namespace {
+        Namespace(ROOT.into())
+    }
+    pub fn serviceaccount() -> Namespace {
+        Namespace(SERVICEACCOUNT_NS.into())
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Permission(pub &'static str);
 
 #[derive(Clone, Debug)]
 pub struct Rel(pub String);
+impl Rel {
+    pub const TRIPLE_DOT: &'static str = "...";
+    pub const IS: &'static str = "is";
+    pub const PARENT: &'static str = "parent";
+    pub const IAM_GET: &'static str = "iam.get";
+    pub const IAM_UPDATE: &'static str = "iam.update";
+    pub const IAM_DELETE: &'static str = "iam.delete";
+    pub const SERVICEACCOUNT_GET: &'static str = "serviceaccount.get";
+    pub const SERVICEACCOUNT_CREATE: &'static str = "serviceaccount.create";
+    pub const SERVICEACCOUNT_KEY_GET: &'static str = "serviceaccount.key.get";
+    pub const SERVICEACCOUNT_KEY_CREATE: &'static str = "serviceaccount.key.create";
+    pub const SERVICEACCOUNT_CREATE_TOKEN: &'static str = "serviceaccount.createToken";
+    pub const USER_CREATE: &'static str = "user.create";
+
+    pub fn triple_dot() -> Rel {
+        Rel(Self::TRIPLE_DOT.into())
+    }
+    pub fn is() -> Rel {
+        Rel(Self::IS.into())
+    }
+    pub fn parent() -> Rel {
+        Rel(Self::PARENT.into())
+    }
+    pub fn iam_get() -> Rel {
+        Rel(Self::IAM_GET.into())
+    }
+    pub fn iam_update() -> Rel {
+        Rel(Self::IAM_UPDATE.into())
+    }
+    pub fn iam_delete() -> Rel {
+        Rel(Self::IAM_DELETE.into())
+    }
+    pub fn serviceaccount_get() -> Rel {
+        Rel(Self::SERVICEACCOUNT_GET.into())
+    }
+    pub fn serviceaccount_create() -> Rel {
+        Rel(Self::SERVICEACCOUNT_CREATE.into())
+    }
+    pub fn serviceaccount_key_get() -> Rel {
+        Rel(Self::SERVICEACCOUNT_KEY_GET.into())
+    }
+    pub fn serviceaccount_key_create() -> Rel {
+        Rel(Self::SERVICEACCOUNT_KEY_CREATE.into())
+    }
+    pub fn serviceaccount_create_token() -> Rel {
+        Rel(Self::SERVICEACCOUNT_CREATE_TOKEN.into())
+    }
+    pub fn user_upsert() -> Rel {
+        Rel(Self::USER_CREATE.into())
+    }
+}
 
 impl From<Permission> for Rel {
     fn from(value: Permission) -> Self {
@@ -62,6 +131,16 @@ impl TryFrom<String> for UserId {
 
 #[derive(Clone, Debug)]
 pub struct Obj(pub String);
+const ROOT_OBJ: &str = "root";
+const UNSPECIFIED_OBJ: &str = "...";
+impl Obj {
+    pub fn unspecified() -> Obj {
+        Obj(UNSPECIFIED_OBJ.into())
+    }
+    pub fn root() -> Obj {
+        Obj(ROOT_OBJ.into())
+    }
+}
 
 impl FromStr for Obj {
     type Err = ParseError;
