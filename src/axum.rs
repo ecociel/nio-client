@@ -16,7 +16,7 @@ use std::marker::PhantomData;
 #[error("Web resource error")]
 pub enum WebResourceError {
     // TODO need additional error for Bearer Token missing
-    MissingSession,
+    MissingSession(String),
     Forbidden,
     MethodNotAllowed,
     InternalServerError(Box<dyn Error + 'static>),
@@ -27,7 +27,7 @@ impl IntoResponse for WebResourceError {
     fn into_response(self) -> Response {
         dbg!(&self);
         match self {
-            WebResourceError::MissingSession => Redirect::to("/signin").into_response(),
+            WebResourceError::MissingSession(loc) => Redirect::to(loc.as_str()).into_response(),
             _ => axum::http::StatusCode::NOT_FOUND.into_response(),
             // WebResourceError::Forbidden => {}
             // WebResourceError::MethodNotAllowed => {}
@@ -127,9 +127,9 @@ where
                 .map_err(|err| WebResourceError::Parse(Box::new(err)))?;
 
             match parts.headers.typed_get::<Cookie>() {
-                None => Err(WebResourceError::MissingSession),
+                None => Err(WebResourceError::MissingSession(auth_state.loc.clone())),
                 Some(c) => match c.get("session") {
-                    None => Err(WebResourceError::MissingSession),
+                    None => Err(WebResourceError::MissingSession(auth_state.loc.clone())),
                     Some(token) => {
                         let ns = resource.namespace(); //R::namespace();
                         let obj = resource.object();
@@ -147,15 +147,15 @@ where
                             Err(err) => {
                                 log::error!("check_client returned error: {:?}", err);
                                 Err(WebResourceError::InternalServerError(Box::new(err)))
-                            },
+                            }
                             Ok(CheckResult::Ok(principal)) => {
                                 log::info!("check_client success, principal={:?}", principal);
                                 Ok(WithPrincipal {
-                                principal,
-                                resource,
-                                auth_type: PhantomData,
-                            })
-                            },
+                                    principal,
+                                    resource,
+                                    auth_type: PhantomData,
+                                })
+                            }
                             // TODO consider passing along principal even when not authenticated
                             Ok(CheckResult::Forbidden(principal)) => {
                                 log::warn!("check_client forbidden, principal={:?}", principal);
@@ -194,8 +194,8 @@ where
 
             // TOD impl proper oauth2 response
             match parts.headers.typed_try_get::<Authorization<Bearer>>() {
-                Err(_) => Err(WebResourceError::MissingSession),
-                Ok(None) => Err(WebResourceError::MissingSession), // TODO
+                Err(_) => Err(WebResourceError::MissingSession(auth_state.loc.clone())),
+                Ok(None) => Err(WebResourceError::MissingSession(auth_state.loc.clone())), // TODO
                 Ok(Some(bearer_auth_value)) => {
                     let ns = resource.namespace(); // R::namespace();
                     let obj = resource.object();
@@ -306,5 +306,6 @@ where
 
 #[derive(Clone)]
 pub struct AuthState {
+    pub loc: String,
     pub check_client: CheckClient,
 }

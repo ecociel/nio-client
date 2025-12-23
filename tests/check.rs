@@ -5,6 +5,7 @@ mod check {
     use check_client::auth::CheckResult;
     use check_client::{CheckClient, Permission};
     use check_client::{Namespace, Obj, UserId};
+    use nio_client::CheckClient;
     // #[tokio::test]
     // #[serial]
     // #[ignore]

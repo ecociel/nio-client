@@ -1,9 +1,8 @@
 [package]
 name = "nio-client"
-version = "0.1.1"
+version = "0.1.2"
 description = "Client for nio authentication and authorization."
 edition = "2021"
-license-file = "LICENSE"
 rust-version = "1.83"
 readme = "README.md"
 #homepage = ""
