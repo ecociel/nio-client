@@ -127,9 +127,13 @@ where
                 .map_err(|err| WebResourceError::Parse(Box::new(err)))?;
 
             match parts.headers.typed_get::<Cookie>() {
-                None => Err(WebResourceError::MissingSession(auth_state.loc.clone())),
+                None => Err(WebResourceError::MissingSession(
+                    auth_state.signin_location.clone(),
+                )),
                 Some(c) => match c.get("session") {
-                    None => Err(WebResourceError::MissingSession(auth_state.loc.clone())),
+                    None => Err(WebResourceError::MissingSession(
+                        auth_state.signin_location.clone(),
+                    )),
                     Some(token) => {
                         let ns = resource.namespace(); //R::namespace();
                         let obj = resource.object();
@@ -194,8 +198,12 @@ where
 
             // TOD impl proper oauth2 response
             match parts.headers.typed_try_get::<Authorization<Bearer>>() {
-                Err(_) => Err(WebResourceError::MissingSession(auth_state.loc.clone())),
-                Ok(None) => Err(WebResourceError::MissingSession(auth_state.loc.clone())), // TODO
+                Err(_) => Err(WebResourceError::MissingSession(
+                    auth_state.signin_location.clone(),
+                )),
+                Ok(None) => Err(WebResourceError::MissingSession(
+                    auth_state.signin_location.clone(),
+                )),
                 Ok(Some(bearer_auth_value)) => {
                     let ns = resource.namespace(); // R::namespace();
                     let obj = resource.object();
@@ -229,6 +237,7 @@ pub struct WithOptPrincipal<R> {
 }
 
 impl<R> WithOptPrincipal<R> {
+    // TODO Keep? Drop?
     // pub fn into_principal(self) -> Option<Principal> {
     //     self.principal
     // }
@@ -306,6 +315,19 @@ where
 
 #[derive(Clone)]
 pub struct AuthState {
-    pub loc: String,
+    pub signin_location: String,
     pub check_client: CheckClient,
+}
+
+impl AuthState {
+    /// Create a new AuthState for use with Axum framework. If prefix is
+    /// [None] redirects go to /signin, else, to /<prefix>/signin.
+    pub fn new(check_client: CheckClient, prefix: Option<&str>) -> Self {
+        AuthState {
+            check_client,
+            signin_location: prefix
+                .map(|p| format!("{}/signin", p))
+                .unwrap_or_else(|| String::from("/")),
+        }
+    }
 }

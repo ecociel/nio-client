@@ -214,22 +214,6 @@ pub struct CheckClient {
 }
 
 impl CheckClient {
-    // <<<<<<< HEAD
-    //     // pub async fn get_all(&mut self, ns: &Namespace, obj: &Obj) -> Result<String, AddError> {
-    //     //     let response = self
-    //     //         .client
-    //     //         .read(pb::ReadRequest {
-    //     //             tuple_sets: vec![TupleSet {
-    //     //                 ns: "".to_string(),
-    //     //                 spec: Some(ObjectSpec(ObjectSpec {})),
-    //     //             }],
-    //     //             ts: None,
-    //     //         })
-    //     //         .await
-    //     //         .map(|r| r.into_inner().ts)
-    //     //         .map_err(Into::into)?;
-    //     // }
-    // =======
     pub async fn get_all(&mut self, ns: &Namespace, obj: &Obj) -> Result<Vec<Tuple>, ReadError> {
         let response = self
             .client
@@ -266,7 +250,6 @@ impl CheckClient {
             })
             .collect())
     }
-    // >>>>>>> b14ae43 (Add read api and client API)
 }
 impl CheckClient {
     pub async fn create(uri: Uri) -> Result<Self, ConnectError> {
@@ -277,12 +260,6 @@ impl CheckClient {
             Err(err) => Err(ConnectError(err)),
         }
     }
-    // pub async fn create(uri: Uri) -> Result<Self, ConnectError> {
-    //     let retry_strategy = FixedInterval::from_millis(100).take(20);
-    //     let channel = Retry::spawn(retry_strategy, connect(uri)).await?;
-    //     let client = pb::check_service_client::CheckServiceClient::new(channel.clone());
-    //     Ok(CheckClient { client })
-    // }
     pub async fn add_one(&mut self, tuple: Tuple) -> Result<String, AddError> {
         let add_tuples = vec![pb::Tuple {
             ns: tuple.ns.0.to_string(),
@@ -406,19 +383,6 @@ impl CheckClient {
     }
 }
 
-// fn connect<'a>(
-//     uri: Uri,
-// ) -> impl FnMut() -> Pin<Box<dyn Future<Output = Result<Channel, ConnectError>> + 'a>> {
-//     move || {
-//         let uri = uri.clone();
-//         Box::pin(async {
-//             match Channel::builder(uri).connect().await {
-//                 Ok(channel) => Ok(channel),
-//                 Err(err) => Err(ConnectError(err)),
-//             }
-//         })
-//     }
-// }
 impl CheckClient {
     pub async fn check(
         &mut self,
