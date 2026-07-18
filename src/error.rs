@@ -1,19 +1,12 @@
 use std::fmt::{Display, Formatter};
 
-// use std::num::ParseIntError;
 use tonic::transport::Error;
 use tonic::Status;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ParseErrorKind {
-    //#[error("maxlen is {0}")]
-    //LengthLimitExceeded(i32),
-    // #[error("invalid syntax: {0}")]
-    // InvalidSyntax(String),
     #[error("invalid syntax")]
     InvalidSyntaxWithInner(#[from] Box<dyn std::error::Error + Send + Sync>),
-    // #[error("invalid integer")]
-    // ParseInt(ParseIntError),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -22,7 +15,6 @@ pub struct ParseError {
     item: String,
     value: String,
     source: ParseErrorKind,
-    //hint: Option<&'static str>
 }
 
 #[derive(Debug)]
@@ -41,43 +33,61 @@ impl std::error::Error for ConnectError {
 }
 
 #[derive(Debug)]
-pub struct AddError(pub(super) Status);
+pub struct WriteError(pub(super) Status);
 
-impl Display for AddError {
+impl Display for WriteError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "add tuples grpc call")
+        write!(f, "write tuples grpc call")
     }
 }
 
-impl std::error::Error for AddError {
+impl std::error::Error for WriteError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.0)
     }
 }
 
-impl From<Status> for AddError {
+impl From<Status> for WriteError {
     fn from(value: Status) -> Self {
-        AddError(value)
+        WriteError(value)
     }
 }
 
+/// Errors from Read / Expand / Watch / list-namespaces and response decoding.
 #[derive(Debug)]
-pub struct ReadError(pub(super) Status);
+pub enum ReadError {
+    /// gRPC transport or server status.
+    Grpc(Status),
+    /// Server returned a protobuf we cannot map (e.g. missing `Tuple.user`).
+    InvalidResponse(String),
+}
 
-impl Display for crate::error::ReadError {
+impl ReadError {
+    pub fn invalid_response(msg: impl Into<String>) -> Self {
+        ReadError::InvalidResponse(msg.into())
+    }
+}
+
+impl Display for ReadError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "read tuples grpc call")
+        match self {
+            ReadError::Grpc(_) => write!(f, "read tuples grpc call"),
+            ReadError::InvalidResponse(msg) => write!(f, "invalid read response: {msg}"),
+        }
     }
 }
 
-impl std::error::Error for crate::error::ReadError {
+impl std::error::Error for ReadError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.0)
+        match self {
+            ReadError::Grpc(status) => Some(status),
+            ReadError::InvalidResponse(_) => None,
+        }
     }
 }
 
-impl From<Status> for crate::error::ReadError {
+impl From<Status> for ReadError {
     fn from(value: Status) -> Self {
-        crate::error::ReadError(value)
+        ReadError::Grpc(value)
     }
 }

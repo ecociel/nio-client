@@ -1,0 +1,78 @@
+version: '3'
+
+tasks:
+  default:
+    cmds:
+      - task --list
+    silent: true
+
+  build:
+    desc: Build the library with the axum feature
+    cmds:
+      - cargo build --features axum
+
+  build-all:
+    desc: Build with all features (includes live-tests)
+    cmds:
+      - cargo build --all-features
+
+  fmt:
+    desc: Format the code
+    cmds:
+      - cargo fmt
+
+  fmt-check:
+    desc: Verify formatting
+    cmds:
+      - cargo fmt --check
+
+  lint:
+    desc: Clippy on all targets, warnings are errors
+    cmds:
+      - cargo clippy --all-targets --features axum -- -D warnings
+
+  test:
+    desc: Unit + mock-server integration tests (no live server needed)
+    cmds:
+      - cargo test --features axum
+
+  test-live:
+    desc: Live-server tests against NIO_CHECK_URI (e.g. http://localhost:50051)
+    preconditions:
+      - sh: test -n "$NIO_CHECK_URI"
+        msg: "NIO_CHECK_URI must be set (e.g. http://localhost:50051)"
+    cmds:
+      - cargo test --features live-tests --test live -- --nocapture
+
+  ci:
+    desc: Full gate - format check, lint, build, test
+    cmds:
+      - task: fmt-check
+      - task: lint
+      - task: build
+      - task: test
+
+  example-check:
+    desc: "Run the check example: task example-check -- <ns> <obj> <rel> <userid> (needs NIO_CHECK_URI)"
+    cmds:
+      - cargo run --example check -- {{.CLI_ARGS}}
+
+  example-list:
+    desc: "Run the list example: task example-list -- <ns> <rel> <userid> (needs NIO_CHECK_URI)"
+    cmds:
+      - cargo run --example list -- {{.CLI_ARGS}}
+
+  example-write:
+    desc: "Run the write example: task example-write -- <ns> <obj> <rel> <userid-or-ns:obj#rel> (needs NIO_CHECK_URI)"
+    cmds:
+      - cargo run --example write -- {{.CLI_ARGS}}
+
+  example-watch:
+    desc: "Run the watch example: task example-watch -- <ns> [start-ts] (needs NIO_CHECK_URI)"
+    cmds:
+      - cargo run --example watch -- {{.CLI_ARGS}}
+
+  example-server:
+    desc: Run the axum server example (needs NIO_CHECK_URI and NIO_SESSION_URI)
+    cmds:
+      - cargo run --example server --features axum

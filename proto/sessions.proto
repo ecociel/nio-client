@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+option go_package = "./";
+package am;
+
+// Token -> principal resolution, owned by nio-client and served on a
+// dedicated listener (SESSION_GRPC_LISTEN_ADDRESS, default :50052) so the
+// relying-party fleet can resolve opaque session tokens without check having
+// to. The raw token NEVER travels on this wire: callers send sha256(token).
+service SessionService {
+  rpc resolve (ResolveRequest) returns (ResolveResponse);
+}
+
+message ResolveRequest {
+  // 64 lowercase hex chars = sha256(raw_token). The raw token never appears here.
+  string token_hash = 1;
+}
+
+message ResolveResponse {
+  oneof outcome {
+    Session session = 1;
+    // unknown, expired, and revoked are deliberately indistinguishable
+    NotFound not_found = 2;
+  }
+}
+
+message Session {
+  string principal = 1;
+  int64 expires_at_unix_seconds = 2;
+  string tenant_id = 3;
+}
+
+message NotFound {}

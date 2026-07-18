@@ -14,6 +14,8 @@ message CheckRequest {
   string obj = 2;
   string rel = 3;
   string userId = 4;
+  // Opaque zookie: standard Base64 of [epoch:u8][millis:u48 BE] (7 bytes).
+  // Store and echo only; do not invent. Empty/default: pack of epoch=1, ms=0.
   string ts = 5;
 }
 
@@ -30,6 +32,7 @@ message ContentChangeCheckRequest {
 }
 message ContentChangeCheckResponse {
   bool ok = 2;
+  // Opaque zookie for the content version (same pack format as CheckRequest.ts).
   string ts = 3;
 }
 
@@ -37,19 +40,40 @@ message ListRequest {
   string ns = 1;
   string rel = 3;
   string userId = 4;
+  // Opaque zookie (see CheckRequest.ts).
   string ts = 5;
 }
 
 message ListResponse {
   repeated string objs = 1;
+  // Evaluation snapshot actually used (paper §2.4.2); opaque packed zookie.
+  // Clients can chain a subsequent check/list/read to the same point in time.
+  string ts = 2;
+}
+
+message ExpandRequest {
+  string ns = 1;
+  string obj = 2;
+  string rel = 3;
+  // Opaque zookie (see CheckRequest.ts).
+  string ts = 4;
+}
+
+message ExpandResponse {
+  // Opaque packed evaluation snapshot zookie.
+  string ts = 1;
+  repeated string userIds = 2;
+  repeated UserSet usersets = 3;
 }
 
 service CheckService {
   rpc check (CheckRequest) returns (CheckResponse);
   rpc content_change_check (ContentChangeCheckRequest) returns (ContentChangeCheckResponse);
   rpc list (ListRequest) returns (ListResponse);
+  rpc expand (ExpandRequest) returns (ExpandResponse);
   rpc read (ReadRequest) returns (ReadResponse);
   rpc write (WriteRequest) returns (WriteResponse);
+  rpc Watch (WatchRequest) returns (stream WatchResponse);
 }
 
 
@@ -86,36 +110,89 @@ message TupleSet {
     string obj = 1;
     optional string rel = 2;
   }
+  // Reverse lookup (paper §2.4.3): tuples in `ns` whose *subject* is the given
+  // user or userset. Optional `rel` restricts to one relation; omit for all.
+  // Answered via the reverse index — raw stored edges, no rewrite evaluation.
   message UserSetSpec {
-    string user_set = 1;
-    optional string rel = 2;
+    oneof user {
+      string user_id = 1;
+      UserSet user_set = 2;
+    }
+    optional string rel = 3;
   }
 
   string ns = 1;
   oneof spec {
     TupleSpec tuple_spec = 2;
     ObjectSpec object_spec = 3;
-    //UserSetSpec userset_spec = 5;
+    UserSetSpec userset_spec = 5;
   }
 }
 
 message ReadRequest {
+  // Optional opaque packed zookie (see CheckRequest.ts).
   optional string ts = 1;
   repeated TupleSet tuple_sets = 2;
 }
 
 message ReadResponse {
+  // Opaque packed evaluation snapshot zookie.
   string ts = 1;
   repeated Tuple tuples = 2;
 }
 
 message WriteRequest {
+  // Optional precondition zookie (OCC); opaque pack format.
   optional string ts = 1;
   repeated Tuple add_tuples = 2;
   repeated Tuple del_tuples = 3;
 }
 
 message WriteResponse {
+  // Opaque packed commit zookie for the write.
   string ts = 1;
+}
+
+message WatchRequest {
+  string ns = 1;
+  // Resume point: only changes committed after this opaque packed zookie.
+  string start_ts = 2;
+}
+
+message WatchResponse {
+  // Watermark: every change with a commit ts <= this has been delivered.
+  // Opaque packed zookie. A commit ts is never split across responses, so a
+  // client may resume from any response's ts (exclusive) without dropping or
+  // repeating a write.
+  string ts = 1;
+  // The complete set of tuple changes committed at `ts`, delivered as the one
+  // atomic write they belong to. Empty => a heartbeat (quiet watermark advance).
+  repeated Update updates = 2;
+}
+
+message Update {
+  Tuple tuple = 1;
+  // false = add, true = tombstone (delete).
+  bool deleted = 2;
+}
+
+message RelationMeta {
+  // A relation and the shape of its userset rewrite. `kind` is one of
+  // `this` | `computed` | `tuple_to` | `union`.
+  string name = 1;
+  string kind = 2;
+}
+
+message NamespaceMeta {
+  string name = 1;
+  repeated RelationMeta relations = 2;
+}
+
+message ListNamespacesResponse {
+  repeated NamespaceMeta namespaces = 1;
+}
+
+service NamespaceService {
+  rpc ListNamespaces (google.protobuf.Empty) returns (ListNamespacesResponse);
 }
 
