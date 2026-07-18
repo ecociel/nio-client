@@ -76,3 +76,8 @@ tasks:
     desc: Run the axum server example (needs NIO_CHECK_URI and NIO_SESSION_URI)
     cmds:
       - cargo run --example server --features axum
+
+  example-webapp:
+    desc: "Run the self-contained learning app on http://127.0.0.1:8080 (no server needed)"
+    cmds:
+      - cargo run --example webapp --features axum

@@ -10,6 +10,16 @@ for easy integration with the `axum` framework (behind the `axum` feature).
 See the [examples](examples) directory: `check`, `list`, `write`, `watch`
 (plain client) and `server` (axum integration).
 
+New to nio? Start with the **[`webapp`](examples/webapp)** example — a
+self-contained learning app (sign-in, cookie-session UI, bearer-token API,
+session resolution, access checks) that runs against an in-process nio
+stand-in and logs every RPC, so no server is required:
+
+    task example-webapp   # then open http://127.0.0.1:8080/
+
+Its [README](examples/webapp/README.md) is a guided walkthrough of the nio
+model and the axum extractors.
+
 # Updating gRPC Code
 
 The generated code is built by `build.rs` (tonic-build) from the proto files
