@@ -43,8 +43,7 @@ impl WebResource for ArticleResource {
 async fn get_article(auth: WithPrincipal<ArticleResource>) -> String {
     format!(
         "Article id={} (principal {})",
-        auth.resource.id,
-        auth.principal.as_str()
+        auth.resource.id, auth.principal
     )
 }
 

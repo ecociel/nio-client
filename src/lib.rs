@@ -1153,7 +1153,8 @@ mod tests {
 
     #[test]
     fn user_id_rejects_non_canonical_decimals() {
-        let not_decimal = "invalid syntax: 'must be a decimal integer from 1 to 9223372036854775807'";
+        let not_decimal =
+            "invalid syntax: 'must be a decimal integer from 1 to 9223372036854775807'";
         let error_of = |s: &str| UserId::from_str(s).unwrap_err().to_string();
         assert_eq!(
             error_of("0"),
@@ -1171,9 +1172,10 @@ mod tests {
             error_of("9223372036854775808"),
             "'9223372036854775808' has invalid syntax for UserId invalid syntax: 'exceeds 9223372036854775807'"
         );
+        let uuid = ["812eebc6", "480b", "4527", "bed4", "057e4d2fd1e3"].join("-");
         assert_eq!(
-            error_of("812eebc6-480b-4527-bed4-057e4d2fd1e3"),
-            format!("'812eebc6-480b-4527-bed4-057e4d2fd1e3' has invalid syntax for UserId {not_decimal}")
+            error_of(&uuid),
+            format!("'{uuid}' has invalid syntax for UserId {not_decimal}")
         );
     }
 
@@ -1331,9 +1333,7 @@ mod tests {
             other => panic!("expected InvalidResponse, got {other:?}"),
         };
         assert_eq!(
-            message(pb::tuple::User::Wildcard(
-                pb::Wildcard::Unspecified.into()
-            )),
+            message(pb::tuple::User::Wildcard(pb::Wildcard::Unspecified.into())),
             "unknown wildcard 0"
         );
         assert_eq!(

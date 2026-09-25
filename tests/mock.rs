@@ -68,7 +68,7 @@ impl wire::check_service_server::CheckService for Mock {
             state.check_fail_next = false;
             return Err(Status::internal("boom"));
         }
-        Ok(Response::new(state.check_response.clone().unwrap_or(
+        Ok(Response::new(state.check_response.unwrap_or(
             wire::CheckResponse {
                 principal: None,
                 ok: false,
@@ -207,15 +207,19 @@ async fn start_mock() -> (Mock, Uri) {
     (mock, uri)
 }
 
+fn uid(n: i64) -> UserId {
+    UserId::try_from(n).unwrap()
+}
+
 async fn client(uri: Uri) -> CheckClient {
     CheckClient::create(uri).await.expect("connect")
 }
 
 #[tokio::test]
-async fn check_ok_maps_principal_and_sends_default_ts() {
+async fn check_ok_maps_principal_and_sends_no_ts() {
     let (mock, uri) = start_mock().await;
     mock.lock().check_response = Some(wire::CheckResponse {
-        principal: Some(wire::Principal { id: "p-1".into() }),
+        principal: Some(wire::Principal { id: 42 }),
         ok: true,
     });
     let mut c = client(uri).await;
@@ -225,13 +229,13 @@ async fn check_ok_maps_principal_and_sends_default_ts() {
             Namespace("doc".into()),
             Obj("1".into()),
             Rel::viewer(),
-            UserId("u1".into()),
+            uid(1),
             None,
         )
         .await
         .expect("check");
     match res {
-        CheckResult::Ok(p) => assert_eq!(p.as_str(), "p-1"),
+        CheckResult::Ok(p) => assert_eq!(p.user_id(), uid(42)),
         other => panic!("expected ok, got {other:?}"),
     }
 
@@ -242,8 +246,8 @@ async fn check_ok_maps_principal_and_sends_default_ts() {
             ns: "doc".into(),
             obj: "1".into(),
             rel: "viewer".into(),
-            user_id: "u1".into(),
-            ts: "AQAAAAAAAA==".into(),
+            user: Some(wire::check_request::User::UserId(1)),
+            ts: None,
         }]
     );
 }
@@ -252,7 +256,7 @@ async fn check_ok_maps_principal_and_sends_default_ts() {
 async fn check_passes_explicit_timestamp() {
     let (mock, uri) = start_mock().await;
     mock.lock().check_response = Some(wire::CheckResponse {
-        principal: Some(wire::Principal { id: "p-1".into() }),
+        principal: Some(wire::Principal { id: 42 }),
         ok: true,
     });
     let mut c = client(uri).await;
@@ -260,19 +264,22 @@ async fn check_passes_explicit_timestamp() {
         Namespace("doc".into()),
         Obj("1".into()),
         Rel::viewer(),
-        UserId("u1".into()),
+        uid(1),
         Some(Timestamp("zookie-1".into())),
     )
     .await
     .expect("check");
-    assert_eq!(mock.lock().check_requests[0].ts, "zookie-1");
+    assert_eq!(
+        mock.lock().check_requests[0].ts.as_deref(),
+        Some("zookie-1")
+    );
 }
 
 #[tokio::test]
 async fn check_forbidden_and_unknown_user() {
     let (mock, uri) = start_mock().await;
     mock.lock().check_response = Some(wire::CheckResponse {
-        principal: Some(wire::Principal { id: "p-1".into() }),
+        principal: Some(wire::Principal { id: 42 }),
         ok: false,
     });
     let mut c = client(uri).await;
@@ -281,12 +288,12 @@ async fn check_forbidden_and_unknown_user() {
             Namespace("doc".into()),
             Obj("1".into()),
             Rel::viewer(),
-            UserId("u1".into()),
+            uid(1),
             None,
         )
         .await
         .expect("check");
-    assert!(matches!(res, CheckResult::Forbidden(p) if p.as_str() == "p-1"));
+    assert!(matches!(res, CheckResult::Forbidden(p) if p.user_id() == uid(42)));
 
     mock.lock().check_response = Some(wire::CheckResponse {
         principal: None,
@@ -297,7 +304,7 @@ async fn check_forbidden_and_unknown_user() {
             Namespace("doc".into()),
             Obj("1".into()),
             Rel::viewer(),
-            UserId("nobody".into()),
+            uid(99),
             None,
         )
         .await
@@ -318,7 +325,7 @@ async fn check_ok_without_principal_is_error() {
             Namespace("doc".into()),
             Obj("1".into()),
             Rel::viewer(),
-            UserId("u1".into()),
+            uid(1),
             None,
         )
         .await
@@ -338,12 +345,12 @@ async fn check_impossible_short_circuits_without_rpc() {
             Namespace("doc".into()),
             Obj("1".into()),
             Rel::impossible(),
-            UserId("u1".into()),
+            uid(1),
             None,
         )
         .await
         .expect("check");
-    assert!(matches!(res, CheckResult::Forbidden(p) if p.as_str().is_empty()));
+    assert!(matches!(res, CheckResult::Forbidden(p) if p.user_id() == uid(1)));
     assert!(mock.lock().check_requests.is_empty(), "no RPC must be made");
 }
 
@@ -351,7 +358,7 @@ async fn check_impossible_short_circuits_without_rpc() {
 async fn observe_check_reports_outcome_and_errors() {
     let (mock, uri) = start_mock().await;
     mock.lock().check_response = Some(wire::CheckResponse {
-        principal: Some(wire::Principal { id: "p-1".into() }),
+        principal: Some(wire::Principal { id: 42 }),
         ok: true,
     });
     let observed_ok = Arc::new(AtomicBool::new(false));
@@ -367,7 +374,7 @@ async fn observe_check_reports_outcome_and_errors() {
         Namespace("doc".into()),
         Obj("1".into()),
         Rel::viewer(),
-        UserId("u1".into()),
+        uid(1),
         None,
     )
     .await
@@ -381,7 +388,7 @@ async fn observe_check_reports_outcome_and_errors() {
             Namespace("doc".into()),
             Obj("1".into()),
             Rel::viewer(),
-            UserId("u1".into()),
+            uid(1),
             None,
         )
         .await
@@ -398,12 +405,7 @@ async fn list_returns_snapshot_ts_and_objs() {
     });
     let mut c = client(uri).await;
     let res = c
-        .list(
-            Namespace("doc".into()),
-            Rel::viewer(),
-            UserId("u1".into()),
-            None,
-        )
+        .list(Namespace("doc".into()), Rel::viewer(), uid(1), None)
         .await
         .expect("list");
     assert_eq!(res.ts.0, "eval-ts");
@@ -413,8 +415,8 @@ async fn list_returns_snapshot_ts_and_objs() {
         wire::ListRequest {
             ns: "doc".into(),
             rel: "viewer".into(),
-            user_id: "u1".into(),
-            ts: "AQAAAAAAAA==".into(),
+            user: Some(wire::list_request::User::UserId(1)),
+            ts: None,
         }
     );
 }
@@ -424,12 +426,13 @@ async fn expand_maps_user_ids_and_usersets() {
     let (mock, uri) = start_mock().await;
     mock.lock().expand_response = Some(wire::ExpandResponse {
         ts: "eval-ts".into(),
-        user_ids: vec!["u1".into(), "u2".into()],
+        user_ids: vec![1, 2],
         usersets: vec![wire::UserSet {
             ns: "grp".into(),
             obj: "eng".into(),
             rel: "member".into(),
         }],
+        wildcards: vec![wire::Wildcard::AllUsers.into()],
     });
     let mut c = client(uri).await;
     let res = c
@@ -442,7 +445,9 @@ async fn expand_maps_user_ids_and_usersets() {
         .await
         .expect("expand");
     assert_eq!(res.ts.0, "eval-ts");
-    assert_eq!(res.user_ids, vec!["u1".to_string(), "u2".to_string()]);
+    assert_eq!(res.user_ids, vec![uid(1), uid(2)]);
+    assert!(res.all_users);
+    assert!(!res.authenticated_users);
     assert_eq!(
         res.usersets,
         vec![UserSet {
@@ -457,7 +462,7 @@ async fn expand_maps_user_ids_and_usersets() {
             ns: "doc".into(),
             obj: "1".into(),
             rel: "viewer".into(),
-            ts: "AQAAAAAAAA==".into(),
+            ts: None,
         }
     );
 }
@@ -475,7 +480,7 @@ async fn content_change_check_maps_ok_and_ts() {
             Namespace("doc".into()),
             Obj("1".into()),
             Rel::editor(),
-            UserId("u1".into()),
+            uid(1),
         )
         .await
         .expect("content change check");
@@ -487,7 +492,7 @@ async fn content_change_check_maps_ok_and_ts() {
             ns: "doc".into(),
             obj: "1".into(),
             rel: "editor".into(),
-            user_id: "u1".into(),
+            user: Some(wire::content_change_check_request::User::UserId(1)),
         }
     );
 }
@@ -502,7 +507,7 @@ async fn read_sends_filters_and_maps_tuples() {
                 ns: "doc".into(),
                 obj: "1".into(),
                 rel: "viewer".into(),
-                user: Some(wire::tuple::User::UserId("u1".into())),
+                user: Some(wire::tuple::User::UserId(1)),
                 condition: Some(wire::tuple::Condition::Expires(1894785600)),
             },
             wire::Tuple {
@@ -524,7 +529,7 @@ async fn read_sends_filters_and_maps_tuples() {
             ReadFilter::by_object(Namespace("doc".into()), Obj("1".into()), None),
             ReadFilter::by_user(
                 Namespace("doc".into()),
-                UserId("u1".into()),
+                User::UserId(uid(1)),
                 Some(Rel::viewer()),
             ),
             ReadFilter::by_user_set(
@@ -542,7 +547,7 @@ async fn read_sends_filters_and_maps_tuples() {
 
     assert_eq!(res.ts.0, "read-ts");
     assert_eq!(res.tuples.len(), 2);
-    assert!(matches!(res.tuples[0].sbj, User::UserId(ref u) if u == "u1"));
+    assert_eq!(res.tuples[0].sbj, User::UserId(uid(1)));
     assert!(matches!(
         res.tuples[0].condition,
         Some(nio_client::Condition::Expires(dt)) if dt.timestamp() == 1894785600
@@ -560,7 +565,7 @@ async fn read_sends_filters_and_maps_tuples() {
         Some(wire::tuple_set::Spec::UsersetSpec(us)) => {
             assert!(matches!(
                 us.user,
-                Some(wire::tuple_set::user_set_spec::User::UserId(ref u)) if u == "u1"
+                Some(wire::tuple_set::user_set_spec::User::UserId(1))
             ));
             assert_eq!(us.rel.as_deref(), Some("viewer"));
         }
@@ -637,7 +642,7 @@ async fn write_sends_add_del_and_precondition() {
                 Namespace("doc".into()),
                 Obj("1".into()),
                 Rel::viewer(),
-                User::UserId("u1".into()),
+                User::UserId(uid(1)),
             )
             .with_expires(exp)],
             vec![Tuple::new(
@@ -681,7 +686,7 @@ async fn add_one_and_delete_one_return_commit_zookie() {
         Namespace("doc".into()),
         Obj("1".into()),
         Rel::viewer(),
-        User::UserId("u1".into()),
+        User::UserId(uid(1)),
     );
     let ts = c.add_one(tuple.clone()).await.expect("add_one");
     assert_eq!(ts.0, "commit-ts");
@@ -737,7 +742,7 @@ async fn watch_streams_heartbeats_and_atomic_writes() {
                         ns: "doc".into(),
                         obj: "1".into(),
                         rel: "viewer".into(),
-                        user: Some(wire::tuple::User::UserId("u1".into())),
+                        user: Some(wire::tuple::User::UserId(1)),
                         condition: None,
                     }),
                     deleted: false,
@@ -747,7 +752,7 @@ async fn watch_streams_heartbeats_and_atomic_writes() {
                         ns: "doc".into(),
                         obj: "1".into(),
                         rel: "editor".into(),
-                        user: Some(wire::tuple::User::UserId("u1".into())),
+                        user: Some(wire::tuple::User::UserId(1)),
                         condition: None,
                     }),
                     deleted: true,
@@ -800,10 +805,10 @@ async fn list_namespaces_maps_schema_metadata() {
     assert_eq!(namespaces[0].relations[0].kind, "union");
 }
 
-fn session_outcome(principal: &str, expires_in_secs: i64) -> wire::ResolveResponse {
+fn session_outcome(principal: i64, expires_in_secs: i64) -> wire::ResolveResponse {
     wire::ResolveResponse {
         outcome: Some(wire::resolve_response::Outcome::Session(wire::Session {
-            principal: principal.into(),
+            principal,
             expires_at_unix_seconds: chrono::Utc::now().timestamp() + expires_in_secs,
             tenant_id: "t1".into(),
         })),
@@ -813,7 +818,7 @@ fn session_outcome(principal: &str, expires_in_secs: i64) -> wire::ResolveRespon
 #[tokio::test]
 async fn grpc_session_resolver_resolves_and_caches() {
     let (mock, uri) = start_mock().await;
-    mock.lock().resolve_response = Some(session_outcome("p-1", 3600));
+    mock.lock().resolve_response = Some(session_outcome(42, 3600));
     let channel = connect_channel(uri, None).await.expect("connect");
     let resolver = GrpcSessionResolver::new(channel, ResolverConfig::default());
 
@@ -823,7 +828,7 @@ async fn grpc_session_resolver_resolves_and_caches() {
         .await
         .expect("resolve")
         .expect("session found");
-    assert_eq!(session.principal, "p-1");
+    assert_eq!(session.principal, uid(42));
     assert_eq!(session.tenant_id, "t1");
 
     // Cached: no second RPC.
@@ -842,6 +847,66 @@ async fn grpc_session_resolver_resolves_and_caches() {
 }
 
 #[tokio::test]
+async fn grpc_session_resolver_rejects_non_positive_principal() {
+    let (mock, uri) = start_mock().await;
+    mock.lock().resolve_response = Some(session_outcome(0, 3600));
+    let channel = connect_channel(uri, None).await.expect("connect");
+    let resolver = GrpcSessionResolver::new(channel, ResolverConfig::default());
+    let err = resolver
+        .resolve("deadbeef")
+        .await
+        .expect_err("principal 0 is a contract error, not a session");
+    assert_eq!(
+        err.to_string(),
+        "session resolve backend error: '0' has invalid syntax for UserId invalid syntax: 'must be a positive 64-bit integer'"
+    );
+}
+
+#[tokio::test]
+async fn expand_rejects_unspecified_wildcard() {
+    let (mock, uri) = start_mock().await;
+    mock.lock().expand_response = Some(wire::ExpandResponse {
+        wildcards: vec![wire::Wildcard::Unspecified.into()],
+        ..Default::default()
+    });
+    let mut c = client(uri).await;
+    let err = c
+        .expand(
+            Namespace("doc".into()),
+            Obj("1".into()),
+            Rel::viewer(),
+            None,
+        )
+        .await
+        .expect_err("unspecified wildcard must fail");
+    assert_eq!(err.to_string(), "invalid read response: unknown wildcard 0");
+}
+
+#[tokio::test]
+async fn check_with_non_positive_principal_is_error() {
+    let (mock, uri) = start_mock().await;
+    mock.lock().check_response = Some(wire::CheckResponse {
+        principal: Some(wire::Principal { id: 0 }),
+        ok: true,
+    });
+    let mut c = client(uri).await;
+    let err = c
+        .check(
+            Namespace("doc".into()),
+            Obj("1".into()),
+            Rel::viewer(),
+            uid(1),
+            None,
+        )
+        .await
+        .expect_err("principal 0 must be an error");
+    assert!(matches!(
+        err,
+        nio_client::auth::CallError::UnexpectedResponseFormat
+    ));
+}
+
+#[tokio::test]
 async fn grpc_session_resolver_not_found_is_none() {
     let (_mock, uri) = start_mock().await;
     let channel = connect_channel(uri, None).await.expect("connect");
@@ -857,7 +922,7 @@ async fn grpc_session_resolver_not_found_is_none() {
 async fn memo_dedupes_identical_checks() {
     let (mock, uri) = start_mock().await;
     mock.lock().check_response = Some(wire::CheckResponse {
-        principal: Some(wire::Principal { id: "p-1".into() }),
+        principal: Some(wire::Principal { id: 42 }),
         ok: true,
     });
     let hits = Arc::new(AtomicUsize::new(0));
@@ -874,17 +939,17 @@ async fn memo_dedupes_identical_checks() {
     let ns = Namespace("doc".into());
     let obj = Obj("1".into());
     let first = memo
-        .check(ns.clone(), obj.clone(), Rel::viewer(), UserId("u1".into()))
+        .check(ns.clone(), obj.clone(), Rel::viewer(), uid(1))
         .await
         .expect("check");
     assert!(first.is_ok());
     let second = memo
-        .check(ns.clone(), obj.clone(), Rel::viewer(), UserId("u1".into()))
+        .check(ns.clone(), obj.clone(), Rel::viewer(), uid(1))
         .await
         .expect("check");
     assert!(second.is_ok());
     // Different key: goes to the server.
-    memo.check(ns.clone(), obj.clone(), Rel::editor(), UserId("u1".into()))
+    memo.check(ns.clone(), obj.clone(), Rel::editor(), uid(1))
         .await
         .expect("check");
 
@@ -901,7 +966,7 @@ async fn memo_dedupes_identical_checks() {
 async fn memo_never_caches_errors() {
     let (mock, uri) = start_mock().await;
     mock.lock().check_response = Some(wire::CheckResponse {
-        principal: Some(wire::Principal { id: "p-1".into() }),
+        principal: Some(wire::Principal { id: 42 }),
         ok: true,
     });
     mock.lock().check_fail_next = true;
@@ -909,11 +974,11 @@ async fn memo_never_caches_errors() {
 
     let ns = Namespace("doc".into());
     let obj = Obj("1".into());
-    memo.check(ns.clone(), obj.clone(), Rel::viewer(), UserId("u1".into()))
+    memo.check(ns.clone(), obj.clone(), Rel::viewer(), uid(1))
         .await
         .expect_err("first call fails");
     let res = memo
-        .check(ns.clone(), obj.clone(), Rel::viewer(), UserId("u1".into()))
+        .check(ns.clone(), obj.clone(), Rel::viewer(), uid(1))
         .await
         .expect("second call retries and succeeds");
     assert!(res.is_ok());
@@ -932,25 +997,25 @@ async fn memo_dedupes_identical_lists_and_fixes_timestamp() {
 
     let ns = Namespace("doc".into());
     let first = memo
-        .list(ns.clone(), Rel::viewer(), UserId("u1".into()))
+        .list(ns.clone(), Rel::viewer(), uid(1))
         .await
         .expect("list");
     assert_eq!(first.objs, vec!["a".to_string()]);
     let _ = memo
-        .list(ns.clone(), Rel::viewer(), UserId("u1".into()))
+        .list(ns.clone(), Rel::viewer(), uid(1))
         .await
         .expect("list");
 
     let reqs = mock.lock().list_requests.clone();
     assert_eq!(reqs.len(), 1, "identical lists must collapse to one RPC");
-    assert_eq!(reqs[0].ts, "pinned-ts");
+    assert_eq!(reqs[0].ts.as_deref(), Some("pinned-ts"));
 }
 
 #[tokio::test]
 async fn memo_concurrent_identical_misses_single_flight() {
     let (mock, uri) = start_mock().await;
     mock.lock().check_response = Some(wire::CheckResponse {
-        principal: Some(wire::Principal { id: "p-1".into() }),
+        principal: Some(wire::Principal { id: 42 }),
         ok: true,
     });
     let memo = Arc::new(RequestMemo::new(client(uri).await));
@@ -963,7 +1028,7 @@ async fn memo_concurrent_identical_misses_single_flight() {
                     Namespace("doc".into()),
                     Obj("1".into()),
                     Rel::viewer(),
-                    UserId("u1".into()),
+                    uid(1),
                 )
                 .await
             })
@@ -995,25 +1060,15 @@ async fn observe_list_reports_outcome_and_errors() {
             err_flag.store(is_error, Ordering::Relaxed);
         },
     ));
-    c.list(
-        Namespace("doc".into()),
-        Rel::viewer(),
-        UserId("u1".into()),
-        None,
-    )
-    .await
-    .expect("list");
+    c.list(Namespace("doc".into()), Rel::viewer(), uid(1), None)
+        .await
+        .expect("list");
     assert_eq!(observed.load(Ordering::Relaxed), 1);
     assert!(!errored.load(Ordering::Relaxed));
 
     mock.lock().list_fail_next = true;
     let _ = c
-        .list(
-            Namespace("doc".into()),
-            Rel::viewer(),
-            UserId("u1".into()),
-            None,
-        )
+        .list(Namespace("doc".into()), Rel::viewer(), uid(1), None)
         .await
         .expect_err("must fail");
     assert_eq!(observed.load(Ordering::Relaxed), 2);
@@ -1025,7 +1080,7 @@ async fn read_by_user_and_user_set_send_reverse_filters() {
     let (mock, uri) = start_mock().await;
     let mut c = client(uri).await;
     let ns = Namespace("doc".into());
-    c.read_by_user(&ns, &UserId("u1".into()), Some(Rel::viewer()))
+    c.read_by_user(&ns, &User::UserId(uid(1)), Some(Rel::viewer()))
         .await
         .expect("read_by_user");
     c.read_by_user_set(
@@ -1045,7 +1100,7 @@ async fn read_by_user_and_user_set_send_reverse_filters() {
         Some(wire::tuple_set::Spec::UsersetSpec(us)) => {
             assert!(matches!(
                 us.user,
-                Some(wire::tuple_set::user_set_spec::User::UserId(ref u)) if u == "u1"
+                Some(wire::tuple_set::user_set_spec::User::UserId(1))
             ));
             assert_eq!(us.rel.as_deref(), Some("viewer"));
         }
@@ -1073,13 +1128,13 @@ async fn add_many_commits_one_atomic_write() {
         Namespace("doc".into()),
         Obj("1".into()),
         Rel::viewer(),
-        User::UserId("u1".into()),
+        User::UserId(uid(1)),
     );
     let t2 = Tuple::new(
         Namespace("doc".into()),
         Obj("1".into()),
         Rel::editor(),
-        User::UserId("u2".into()),
+        User::UserId(uid(2)),
     );
     let ts = c.add_many(vec![t1, t2]).await.expect("add_many");
     assert_eq!(ts.0, "commit-ts");
@@ -1143,11 +1198,9 @@ mod axum_extractors {
     #[tokio::test]
     async fn cookie_auth_checks_resolved_principal_not_raw_token() {
         let (mock, uri) = start_mock().await;
-        mock.lock().resolve_response = Some(session_outcome("p-uuid", 3600));
+        mock.lock().resolve_response = Some(session_outcome(42, 3600));
         mock.lock().check_response = Some(wire::CheckResponse {
-            principal: Some(wire::Principal {
-                id: "p-uuid".into(),
-            }),
+            principal: Some(wire::Principal { id: 42 }),
             ok: true,
         });
         let state = auth_state(uri, None).await;
@@ -1155,12 +1208,13 @@ mod axum_extractors {
         let got = WithPrincipal::<DocResource>::from_request_parts(&mut parts, &state)
             .await
             .expect("authorized");
-        assert_eq!(got.principal.as_str(), "p-uuid");
+        assert_eq!(got.principal.user_id(), uid(42));
 
         let reqs = mock.lock().check_requests.clone();
         assert_eq!(reqs.len(), 1);
         assert_eq!(
-            reqs[0].user_id, "p-uuid",
+            reqs[0].user,
+            Some(wire::check_request::User::UserId(42)),
             "check must see the resolved principal, never the raw token"
         );
         assert_eq!(
@@ -1218,11 +1272,9 @@ mod axum_extractors {
     #[tokio::test]
     async fn bearer_auth_resolves_and_checks() {
         let (mock, uri) = start_mock().await;
-        mock.lock().resolve_response = Some(session_outcome("p-uuid", 3600));
+        mock.lock().resolve_response = Some(session_outcome(42, 3600));
         mock.lock().check_response = Some(wire::CheckResponse {
-            principal: Some(wire::Principal {
-                id: "p-uuid".into(),
-            }),
+            principal: Some(wire::Principal { id: 42 }),
             ok: true,
         });
         let state = auth_state(uri, None).await;
@@ -1231,7 +1283,7 @@ mod axum_extractors {
             WithPrincipal::<DocResource, BearerTokenAuth>::from_request_parts(&mut parts, &state)
                 .await
                 .expect("authorized");
-        assert_eq!(got.principal.as_str(), "p-uuid");
+        assert_eq!(got.principal.user_id(), uid(42));
         assert_eq!(
             mock.lock().resolve_requests[0].token_hash,
             token_hash("api-token")
@@ -1241,11 +1293,9 @@ mod axum_extractors {
     #[tokio::test]
     async fn forbidden_check_is_forbidden() {
         let (mock, uri) = start_mock().await;
-        mock.lock().resolve_response = Some(session_outcome("p-uuid", 3600));
+        mock.lock().resolve_response = Some(session_outcome(42, 3600));
         mock.lock().check_response = Some(wire::CheckResponse {
-            principal: Some(wire::Principal {
-                id: "p-uuid".into(),
-            }),
+            principal: Some(wire::Principal { id: 42 }),
             ok: false,
         });
         let state = auth_state(uri, None).await;
@@ -1260,13 +1310,13 @@ mod axum_extractors {
     #[tokio::test]
     async fn authenticated_yields_principal_without_check() {
         let (mock, uri) = start_mock().await;
-        mock.lock().resolve_response = Some(session_outcome("p-uuid", 3600));
+        mock.lock().resolve_response = Some(session_outcome(42, 3600));
         let state = auth_state(uri, None).await;
         let mut parts = parts_with_headers(&[("authorization", "Bearer api-token")]);
         let got = Authenticated::<BearerTokenAuth>::from_request_parts(&mut parts, &state)
             .await
             .expect("authenticated");
-        assert_eq!(got.principal.0, "p-uuid");
+        assert_eq!(got.principal, uid(42));
         assert!(mock.lock().check_requests.is_empty(), "no check RPC");
     }
 }

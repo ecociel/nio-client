@@ -11,7 +11,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ns = Namespace(args[1].clone());
     let rel = Rel(args[2].clone());
-    let userid = UserId(args[3].clone());
+    let userid: UserId = args[3].parse()?;
 
     let nio_check_uri =
         env::var("NIO_CHECK_URI").map_err(|_| "NIO_CHECK_URI environment variable not set")?;

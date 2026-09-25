@@ -22,20 +22,17 @@ use std::sync::{Arc, Mutex};
 use http::Uri;
 use nio_client::session::token_hash;
 use nio_client::wire;
+use nio_client::{User, UserId};
 use rand::RngCore;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
-/// Public subject wildcard: a tuple whose subject is `allUsers` grants the
-/// relation to everyone, signed in or not (nio's `UserId::all_users()`).
-const ALL_USERS: &str = "allUsers";
-
 /// How long an issued demo session stays valid.
 const SESSION_TTL_SECONDS: i64 = 3600;
 
 struct Session {
-    principal: String,
+    principal: UserId,
     expires_at_unix: i64,
 }
 
@@ -43,12 +40,12 @@ struct Session {
 struct State {
     /// token hash -> issued session. Written by `create_session` on sign-in.
     sessions: HashMap<String, Session>,
-    /// The relationship tuples: (namespace, object, relation, subject).
+    /// The relationship tuples: (namespace, object, relation, subject text).
     /// A check succeeds when a matching tuple exists for the principal (or for
     /// the `allUsers` wildcard).
     tuples: HashSet<(String, String, String, String)>,
-    /// principal UUID -> human name, for readable console logs only.
-    names: HashMap<String, String>,
+    /// principal -> human name, for readable console logs only.
+    names: HashMap<UserId, String>,
 }
 
 /// The in-process nio backend. Cloneable: every clone shares one `State`.
@@ -66,16 +63,14 @@ impl Backend {
         self.state.lock().expect("backend state poisoned")
     }
 
-    /// Registers a principal UUID with a display name (used in logs).
-    pub fn register_principal(&self, principal: &str, name: &str) {
-        self.lock()
-            .names
-            .insert(principal.to_string(), name.to_string());
+    /// Registers a principal with a display name (used in logs).
+    pub fn register_principal(&self, principal: UserId, name: &str) {
+        self.lock().names.insert(principal, name.to_string());
     }
 
     /// Grants `subject` the `rel` relation on `ns:obj` — the equivalent of a
     /// nio `Write` of one relationship tuple.
-    pub fn grant(&self, ns: &str, obj: &str, rel: &str, subject: &str) {
+    pub fn grant(&self, ns: &str, obj: &str, rel: &str, subject: User) {
         self.lock().tuples.insert((
             ns.to_string(),
             obj.to_string(),
@@ -89,7 +84,7 @@ impl Backend {
     /// the browser (cookie) or an API client (bearer). This models a session
     /// that nio's session service would create after your app authenticates a
     /// user.
-    pub fn create_session(&self, principal: &str) -> String {
+    pub fn create_session(&self, principal: UserId) -> String {
         let mut bytes = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut bytes);
         let raw = hex::encode(bytes);
@@ -97,7 +92,7 @@ impl Backend {
         self.lock().sessions.insert(
             token_hash(&raw),
             Session {
-                principal: principal.to_string(),
+                principal,
                 expires_at_unix,
             },
         );
@@ -158,7 +153,7 @@ impl wire::session_service_server::SessionService for Backend {
                     s.principal
                 );
                 wire::resolve_response::Outcome::Session(wire::Session {
-                    principal: s.principal.clone(),
+                    principal: s.principal.get(),
                     tenant_id: "demo".into(),
                     expires_at_unix_seconds: s.expires_at_unix,
                 })
@@ -182,9 +177,15 @@ impl wire::check_service_server::CheckService for Backend {
         request: Request<wire::CheckRequest>,
     ) -> Result<Response<wire::CheckResponse>, Status> {
         let req = request.into_inner();
+        let Some(wire::check_request::User::UserId(id)) = req.user else {
+            return Err(Status::invalid_argument(
+                "the demo only checks userId subjects",
+            ));
+        };
+        let user_id = UserId::try_from(id).map_err(|e| Status::invalid_argument(e.to_string()))?;
         let state = self.lock();
 
-        let key = |subject: &str| {
+        let key = |subject: User| {
             (
                 req.ns.clone(),
                 req.obj.clone(),
@@ -192,9 +193,9 @@ impl wire::check_service_server::CheckService for Backend {
                 subject.to_string(),
             )
         };
-        let granted = state.tuples.contains(&key(&req.user_id));
-        let public = state.tuples.contains(&key(ALL_USERS));
-        let known = state.names.contains_key(&req.user_id);
+        let granted = state.tuples.contains(&key(user_id.into()));
+        let public = state.tuples.contains(&key(User::AllUsers));
+        let known = state.names.contains_key(&user_id);
         let allowed = granted || public;
 
         // Response contract (see CheckClient::check): a known principal always
@@ -202,9 +203,7 @@ impl wire::check_service_server::CheckService for Backend {
         // grant is reported as "unknown putative user" (principal = None).
         let (principal, verdict) = if known || granted || public {
             (
-                Some(wire::Principal {
-                    id: req.user_id.clone(),
-                }),
+                Some(wire::Principal { id: user_id.get() }),
                 if allowed { "ALLOW" } else { "DENY" },
             )
         } else {
@@ -213,12 +212,12 @@ impl wire::check_service_server::CheckService for Backend {
 
         let name = state
             .names
-            .get(&req.user_id)
+            .get(&user_id)
             .cloned()
             .unwrap_or_else(|| "?".into());
         println!(
             "[nio check]   {}:{}#{} @ {} ({name}) -> {verdict}",
-            req.ns, req.obj, req.rel, req.user_id
+            req.ns, req.obj, req.rel, user_id
         );
 
         Ok(Response::new(wire::CheckResponse {

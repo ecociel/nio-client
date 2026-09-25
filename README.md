@@ -45,9 +45,30 @@ Typical gate relations:
 - admin path: `Rel::iam_update()` (`iam.update`), `Rel::serviceaccount_create()`
 
 Roles that carry direct grants: `Rel::admin()`, `Rel::editor()`,
-`Rel::viewer()`. Public subject markers: `UserId::all_users()`,
-`UserId::authenticated_users()`. The pointer object/rel keyword is `"..."`
-(`Obj::unspecified()` / `Rel::unspecified()`).
+`Rel::viewer()`. Public subject markers: `User::AllUsers` (`allUsers`) and
+`User::AuthenticatedUsers` (`authenticatedUsers`). The pointer object/rel
+keyword is `"..."` (`Obj::unspecified()` / `Rel::unspecified()`).
+
+# User IDs and subjects
+
+A `UserId` is a positive 64-bit integer (nio #301). Build one with
+`UserId::try_from(42_i64)` or parse the decimal text with `"42".parse()`.
+Parsing is strict: it accepts `1` to `9223372036854775807` with no sign and no
+leading zero. It rejects `0`, `-5`, `01`, and any value that does not fit in an
+`i64`. `UserId::get()` returns the `i64`. `Display` prints the plain decimal.
+
+A tuple subject is a `User`:
+
+- `User::UserId(id)` is one principal (`42`)
+- `User::AllUsers` is everyone, signed in or not (`allUsers`)
+- `User::AuthenticatedUsers` is every signed-in principal (`authenticatedUsers`)
+- `User::UserSet { ns, obj, rel }` is a userset (`group:eng#member`)
+
+`User` parses from and prints to the text form in parentheses. `check`,
+`list`, and `content_change_check` take a `UserId`, because nio evaluates
+those calls for one principal. `expand` returns the principals in
+`user_ids` and reports the wildcards in `all_users` and
+`authenticated_users`.
 
 # Construction
 
@@ -84,7 +105,7 @@ All channels enable HTTP/2 keepalive (30s / 10s / while idle — nio #239).
 Opaque session tokens are resolved via `am.SessionService` on nio-client
 (issue #243/#245). The axum extractors hash the cookie or bearer token
 (`sha256`, hex — the raw token never leaves the process), resolve it, and
-send the principal UUID to `check`. Unknown / expired / revoked tokens
+send the principal's `UserId` to `check`. Unknown / expired / revoked tokens
 redirect to signin with zero check RPCs.
 
 The resolver caches positives (LRU, TTL with downward-only jitter), tombstones
@@ -97,7 +118,7 @@ expiry, and can optionally serve stale entries during transport errors
 Check/list/write use **opaque packed zookies** (standard Base64 of 7 bytes:
 `[epoch:u8][millis:u48 BE]`). Treat them as opaque: store and echo only.
 
-- `Timestamp::empty()` (`AQAAAAAAAA==`) — no fresher-than constraint; server picks a snapshot
+- `None` — no fresher-than constraint; the client leaves `ts` unset and the server picks its default snapshot
 - Write helpers (`add_one`, `add_many`, `add_parent`, `delete_one`, `write`) return the **commit** zookie
 - `list` / `read` / `expand` return the **evaluation** snapshot zookie in their results
 - Pass a zookie into `check` / `list` / `read_with_timestamp` for read-your-writes
@@ -120,8 +141,9 @@ Call `recv` on the returned stream: empty `updates` is a heartbeat; non-empty
 is one atomic write at `ts`. Resume from any received `ts` (exclusive).
 
 The Read API supports object filters (`ReadFilter::by_object`) and reverse
-subject filters (`ReadFilter::by_user`, `ReadFilter::by_user_set`, paper
-§2.4.3) answered via the reverse index — raw stored edges, no rewrite
+subject filters (`ReadFilter::by_user` for any `User`,
+`ReadFilter::by_user_set`, paper §2.4.3) answered via the reverse index — raw
+stored edges, no rewrite
 evaluation. Use `expand` for the effective userset.
 
 # Request-scoped check memoization
@@ -132,7 +154,7 @@ collapses to far fewer RPCs:
 
 ```rust,ignore
 let memo = nio_client::memo::RequestMemo::new(check_client.clone());
-let first = memo.check(ns.clone(), obj.clone(), rel.clone(), user.clone()).await?; // RPC
+let first = memo.check(ns.clone(), obj.clone(), rel.clone(), user).await?; // RPC
 let again = memo.check(ns, obj, rel, user).await?; // in-request cache hit
 ```
 
@@ -156,7 +178,7 @@ A [Taskfile](https://taskfile.dev) drives the workflow:
     task test        # unit + in-process mock gRPC server tests
     task test-live   # live tests against NIO_CHECK_URI
     task ci          # fmt-check + lint + build + test
-    task example-check -- customer acme customer.update <userid>
+    task example-check -- customer acme customer.update 42
 
 # License
 

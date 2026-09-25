@@ -25,7 +25,7 @@ use axum::{Form, Json, Router};
 use headers::{Cookie, HeaderMapExt};
 use nio_client::axum::{AuthState, BearerTokenAuth, WebResource, WithOptPrincipal, WithPrincipal};
 use nio_client::session::token_hash;
-use nio_client::{Namespace, Obj, Rel};
+use nio_client::{Namespace, Obj, Rel, User, UserId};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -37,9 +37,14 @@ pub const NAMESPACE: &str = "article";
 const REL_GET: &str = "article.get";
 const REL_UPDATE: &str = "article.update";
 
-// Demo principals. In production these are real user UUIDs minted by nio.
-const ALICE: &str = "11111111-1111-1111-1111-111111111111";
-const BOB: &str = "22222222-2222-2222-2222-222222222222";
+// Demo principals. In production these are positive 64-bit user IDs minted by
+// nio.
+const ALICE: i64 = 1001;
+const BOB: i64 = 1002;
+
+fn demo_user(id: i64) -> UserId {
+    UserId::try_from(id).expect("demo user ids are positive")
+}
 
 /// Seeds the backend with the demo users and the relationship tuples that the
 /// checks evaluate against.
@@ -50,17 +55,18 @@ const BOB: &str = "22222222-2222-2222-2222-222222222222";
 /// | article 2 | get            | get + update   | —      |
 /// | article 3 | (via allUsers) | (via allUsers) | get    |
 pub fn seed(backend: &Backend) {
-    backend.register_principal(ALICE, "alice");
-    backend.register_principal(BOB, "bob");
+    let (alice, bob) = (demo_user(ALICE), demo_user(BOB));
+    backend.register_principal(alice, "alice");
+    backend.register_principal(bob, "bob");
 
-    backend.grant(NAMESPACE, "1", REL_GET, ALICE);
-    backend.grant(NAMESPACE, "1", REL_UPDATE, ALICE);
+    backend.grant(NAMESPACE, "1", REL_GET, alice.into());
+    backend.grant(NAMESPACE, "1", REL_UPDATE, alice.into());
 
-    backend.grant(NAMESPACE, "2", REL_GET, BOB);
-    backend.grant(NAMESPACE, "2", REL_UPDATE, BOB);
-    backend.grant(NAMESPACE, "2", REL_GET, ALICE);
+    backend.grant(NAMESPACE, "2", REL_GET, bob.into());
+    backend.grant(NAMESPACE, "2", REL_UPDATE, bob.into());
+    backend.grant(NAMESPACE, "2", REL_GET, alice.into());
 
-    backend.grant(NAMESPACE, "3", REL_GET, "allUsers");
+    backend.grant(NAMESPACE, "3", REL_GET, User::AllUsers);
 }
 
 #[derive(Clone)]
@@ -191,8 +197,8 @@ async fn ui_article(auth: WithPrincipal<ArticleResource>) -> Html<String> {
     let (title, body) = article(id);
     Html(article_page_html(
         id,
-        display_name(auth.principal.as_str()),
-        auth.principal.as_str(),
+        display_name(auth.principal.user_id()),
+        &auth.principal.to_string(),
         title,
         body,
     ))
@@ -204,7 +210,7 @@ async fn public_article(auth: WithOptPrincipal<ArticleResource>) -> Html<String>
     let id = &auth.resource.id;
     let (title, body) = article(id);
     let who = match &auth.principal {
-        Some(p) => format!("signed in as <b>{}</b>", display_name(p.as_str())),
+        Some(p) => format!("signed in as <b>{}</b>", display_name(p.user_id())),
         None => "anonymous".to_string(),
     };
     let body = format!(
@@ -222,8 +228,8 @@ async fn api_get(auth: WithPrincipal<ArticleResource, BearerTokenAuth>) -> Json<
     Json(json!({
         "action": "view",
         "id": id,
-        "principal": auth.principal.as_str(),
-        "user": display_name(auth.principal.as_str()),
+        "principal": auth.principal.to_string(),
+        "user": display_name(auth.principal.user_id()),
         "title": title,
         "body": body,
     }))
@@ -237,8 +243,8 @@ async fn api_update(
     Json(json!({
         "action": "update",
         "id": id,
-        "principal": auth.principal.as_str(),
-        "user": display_name(auth.principal.as_str()),
+        "principal": auth.principal.to_string(),
+        "user": display_name(auth.principal.user_id()),
         "ok": true,
         "message": format!("article {id} updated"),
     }))
@@ -246,16 +252,16 @@ async fn api_update(
 
 // --- demo policy & content --------------------------------------------------
 
-fn authenticate(username: &str, password: &str) -> Option<&'static str> {
+fn authenticate(username: &str, password: &str) -> Option<UserId> {
     match (username, password) {
-        ("alice", "alice") => Some(ALICE),
-        ("bob", "bob") => Some(BOB),
+        ("alice", "alice") => Some(demo_user(ALICE)),
+        ("bob", "bob") => Some(demo_user(BOB)),
         _ => None,
     }
 }
 
-fn display_name(principal: &str) -> &'static str {
-    match principal {
+fn display_name(principal: UserId) -> &'static str {
+    match principal.get() {
         ALICE => "alice",
         BOB => "bob",
         _ => "unknown",
