@@ -2,8 +2,6 @@ use http::Uri;
 use nio_client::{CheckClient, Namespace, Obj, Rel, Tuple, User};
 use std::env;
 
-/// Adds one tuple. The subject may be a decimal user id, `allUsers`,
-/// `authenticatedUsers`, or a userset written as `ns:obj#rel`.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();

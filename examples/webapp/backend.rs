@@ -36,15 +36,19 @@ struct Session {
     expires_at_unix: i64,
 }
 
+#[derive(PartialEq, Eq, Hash)]
+struct Grant {
+    ns: String,
+    obj: String,
+    rel: String,
+    subject: String,
+}
+
 #[derive(Default)]
 struct State {
     /// token hash -> issued session. Written by `create_session` on sign-in.
     sessions: HashMap<String, Session>,
-    /// The relationship tuples: (namespace, object, relation, subject text).
-    /// A check succeeds when a matching tuple exists for the principal (or for
-    /// the `allUsers` wildcard).
-    tuples: HashSet<(String, String, String, String)>,
-    /// principal -> human name, for readable console logs only.
+    tuples: HashSet<Grant>,
     names: HashMap<UserId, String>,
 }
 
@@ -63,7 +67,6 @@ impl Backend {
         self.state.lock().expect("backend state poisoned")
     }
 
-    /// Registers a principal with a display name (used in logs).
     pub fn register_principal(&self, principal: UserId, name: &str) {
         self.lock().names.insert(principal, name.to_string());
     }
@@ -71,12 +74,12 @@ impl Backend {
     /// Grants `subject` the `rel` relation on `ns:obj` — the equivalent of a
     /// nio `Write` of one relationship tuple.
     pub fn grant(&self, ns: &str, obj: &str, rel: &str, subject: User) {
-        self.lock().tuples.insert((
-            ns.to_string(),
-            obj.to_string(),
-            rel.to_string(),
-            subject.to_string(),
-        ));
+        self.lock().tuples.insert(Grant {
+            ns: ns.to_string(),
+            obj: obj.to_string(),
+            rel: rel.to_string(),
+            subject: subject.to_string(),
+        });
     }
 
     /// Issues a session for `principal` and returns the raw opaque token. Only
@@ -185,13 +188,11 @@ impl wire::check_service_server::CheckService for Backend {
         let user_id = UserId::try_from(id).map_err(|e| Status::invalid_argument(e.to_string()))?;
         let state = self.lock();
 
-        let key = |subject: User| {
-            (
-                req.ns.clone(),
-                req.obj.clone(),
-                req.rel.clone(),
-                subject.to_string(),
-            )
+        let key = |subject: User| Grant {
+            ns: req.ns.clone(),
+            obj: req.obj.clone(),
+            rel: req.rel.clone(),
+            subject: subject.to_string(),
         };
         let granted = state.tuples.contains(&key(user_id.into()));
         let public = state.tuples.contains(&key(User::AllUsers));

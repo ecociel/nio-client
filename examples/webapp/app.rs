@@ -37,8 +37,6 @@ pub const NAMESPACE: &str = "article";
 const REL_GET: &str = "article.get";
 const REL_UPDATE: &str = "article.update";
 
-// Demo principals. In production these are positive 64-bit user IDs minted by
-// nio.
 const ALICE: i64 = 1001;
 const BOB: i64 = 1002;
 

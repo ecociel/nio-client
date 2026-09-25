@@ -978,7 +978,7 @@ enum Wildcard {
     AuthenticatedUsers,
 }
 
-#[allow(clippy::result_large_err)] // ReadError embeds tonic::Status by design
+#[allow(clippy::result_large_err)]
 fn wildcard_from_pb(w: i32) -> Result<Wildcard, ReadError> {
     match pb::Wildcard::try_from(w) {
         Ok(pb::Wildcard::AllUsers) => Ok(Wildcard::AllUsers),
@@ -989,7 +989,7 @@ fn wildcard_from_pb(w: i32) -> Result<Wildcard, ReadError> {
     }
 }
 
-#[allow(clippy::result_large_err)] // ReadError embeds tonic::Status by design
+#[allow(clippy::result_large_err)]
 fn user_from_pb(user: pb::tuple::User) -> Result<User, ReadError> {
     match user {
         pb::tuple::User::UserId(id) => UserId::try_from(id)
