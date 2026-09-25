@@ -1,13 +1,14 @@
 use std::fmt::{Display, Formatter};
+use std::num::NonZeroI64;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::auth::{CallError, CheckResult};
+use crate::auth::{CallError, CheckResult, Principal};
 use crate::error::ReadError;
 use chrono::{DateTime, Utc};
-pub use error::ConnectError;
-use error::{ParseError, WriteError};
+use error::WriteError;
+pub use error::{ConnectError, ParseError};
 use http::Uri;
 use tonic::transport::{Channel, ClientTlsConfig};
 
@@ -19,7 +20,7 @@ pub mod memo;
 pub mod session;
 
 /// Ns is a collection of objects.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Namespace(pub String);
 
 /// Built-in namespaces (nio domain / check bootstrap): `iam` and
@@ -37,7 +38,7 @@ impl Namespace {
 }
 
 /// Rel is a relation (or computed permission) on an object.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Rel(pub String);
 
 /// Built-in relations (nio domain / check bootstrap). Roles
@@ -128,20 +129,28 @@ impl From<&str> for Rel {
     }
 }
 
-/// UserId is a user's ID: a principal UUID, or a public subject marker.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UserId(pub String);
+/// UserId is a principal's ID: a positive 64-bit integer (nio #301).
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UserId(NonZeroI64);
 
-/// Public subject markers (nio domain). Grantable like any other user id.
 impl UserId {
-    pub const ALL_USERS: &'static str = "allUsers";
-    pub const AUTHENTICATED_USERS: &'static str = "authenticatedUsers";
-
-    pub fn all_users() -> UserId {
-        UserId(Self::ALL_USERS.into())
+    pub fn get(self) -> i64 {
+        self.0.get()
     }
-    pub fn authenticated_users() -> UserId {
-        UserId(Self::AUTHENTICATED_USERS.into())
+}
+
+impl TryFrom<i64> for UserId {
+    type Error = ParseError;
+
+    fn try_from(n: i64) -> Result<Self, Self::Error> {
+        match NonZeroI64::new(n) {
+            Some(nz) if n > 0 => Ok(UserId(nz)),
+            _ => Err(ParseError::invalid_syntax(
+                "UserId",
+                n.to_string(),
+                "must be a positive 64-bit integer",
+            )),
+        }
     }
 }
 
@@ -149,14 +158,35 @@ impl FromStr for UserId {
     type Err = ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(UserId(s.into()))
+        let decimal = !s.is_empty()
+            && s.len() <= 19
+            && !s.starts_with('0')
+            && s.bytes().all(|b| b.is_ascii_digit());
+        if !decimal {
+            return Err(ParseError::invalid_syntax(
+                "UserId",
+                s,
+                "must be a decimal integer from 1 to 9223372036854775807",
+            ));
+        }
+        let n: i64 = s
+            .parse()
+            .map_err(|_| ParseError::invalid_syntax("UserId", s, "exceeds 9223372036854775807"))?;
+        UserId::try_from(n)
     }
 }
 
 impl TryFrom<String> for UserId {
     type Error = ParseError;
+
     fn try_from(value: String) -> Result<Self, Self::Error> {
         UserId::from_str(&value)
+    }
+}
+
+impl Display for UserId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -177,7 +207,7 @@ impl Timestamp {
 }
 
 /// Obj is an object.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Obj(pub String);
 
 /// `root` is the singleton object of the iam namespace; `...` is the pointer
@@ -217,10 +247,73 @@ pub struct UserSet {
     pub rel: Rel,
 }
 
-#[derive(Clone, Debug)]
+/// The subject of a tuple: one principal, a public wildcard, or a userset.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum User {
-    UserId(String),
+    UserId(UserId),
+    AllUsers,
+    AuthenticatedUsers,
     UserSet { ns: Namespace, obj: Obj, rel: Rel },
+}
+
+impl User {
+    pub const ALL_USERS: &'static str = "allUsers";
+    pub const AUTHENTICATED_USERS: &'static str = "authenticatedUsers";
+
+    fn from_id_str(s: &str) -> Result<User, ParseError> {
+        match s {
+            Self::ALL_USERS => Ok(User::AllUsers),
+            Self::AUTHENTICATED_USERS => Ok(User::AuthenticatedUsers),
+            _ => Ok(User::UserId(UserId::from_str(s)?)),
+        }
+    }
+}
+
+impl FromStr for User {
+    type Err = ParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let Some((ns_obj, rel)) = s.split_once('#') else {
+            return User::from_id_str(s);
+        };
+        let Some((ns, obj)) = ns_obj.split_once(':') else {
+            return Err(ParseError::invalid_syntax(
+                "User::UserSet",
+                s,
+                "wrong pattern for userset: missing ':' delimiter",
+            ));
+        };
+        Ok(User::UserSet {
+            ns: Namespace(ns.into()),
+            obj: Obj(obj.into()),
+            rel: Rel(rel.into()),
+        })
+    }
+}
+
+impl Display for User {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            User::UserId(id) => write!(f, "{id}"),
+            User::AllUsers => f.write_str(Self::ALL_USERS),
+            User::AuthenticatedUsers => f.write_str(Self::AUTHENTICATED_USERS),
+            User::UserSet { ns, obj, rel } => write!(f, "{}:{}#{}", ns.0, obj.0, rel.0),
+        }
+    }
+}
+
+impl TryFrom<String> for User {
+    type Error = ParseError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        User::from_str(&value)
+    }
+}
+
+impl From<UserId> for User {
+    fn from(value: UserId) -> Self {
+        User::UserId(value)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -258,18 +351,11 @@ impl Tuple {
 
 impl Display for Tuple {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match &self.sbj {
-            User::UserId(s) => write!(
-                f,
-                "Tuple({}:{}#{}@{})",
-                self.ns.0, self.obj.0, self.rel.0, s
-            ),
-            User::UserSet { ns, obj, rel } => write!(
-                f,
-                "Tuple({}:{}#{}@{}:{}#{})",
-                self.ns.0, self.obj.0, self.rel.0, ns.0, obj.0, rel.0
-            ),
-        }
+        write!(
+            f,
+            "Tuple({}:{}#{}@{})",
+            self.ns.0, self.obj.0, self.rel.0, self.sbj
+        )
     }
 }
 
@@ -294,12 +380,15 @@ pub struct ListResult {
 }
 
 /// Result of [`CheckClient::expand`]: the evaluation snapshot zookie, the
-/// flattened leaf user ids, and the usersets left opaque (e.g. `...` parent
-/// pointers or references the server could not resolve).
+/// flattened leaf user ids, whether a public wildcard holds the relation, and
+/// the usersets left opaque (e.g. `...` parent pointers or references the
+/// server could not resolve).
 #[derive(Clone, Debug)]
 pub struct ExpandResult {
     pub ts: Timestamp,
-    pub user_ids: Vec<String>,
+    pub user_ids: Vec<UserId>,
+    pub all_users: bool,
+    pub authenticated_users: bool,
     pub usersets: Vec<UserSet>,
 }
 
@@ -393,16 +482,17 @@ impl ReadFilter {
         }
     }
 
-    /// Reverse-reads tuples in `ns` whose subject is `user_id` (paper §2.4.3
+    /// Reverse-reads tuples in `ns` whose subject is `user` (paper §2.4.3
     /// UserSetSpec). Answered via the reverse index — raw stored edges, no
     /// rewrite evaluation. `rel` `None` means all relations.
-    pub fn by_user(ns: Namespace, user_id: UserId, rel: Option<Rel>) -> ReadFilter {
+    pub fn by_user(ns: Namespace, user: User, rel: Option<Rel>) -> ReadFilter {
+        use pb::tuple_set::user_set_spec::User as Pb;
         ReadFilter {
             set: pb::TupleSet {
                 ns: ns.0,
                 spec: Some(pb::tuple_set::Spec::UsersetSpec(
                     pb::tuple_set::UserSetSpec {
-                        user: Some(pb::tuple_set::user_set_spec::User::UserId(user_id.0)),
+                        user: Some(user_to_pb(user, Pb::UserId, Pb::UserSet, Pb::Wildcard)),
                         rel: rel.map(|r| r.0),
                     },
                 )),
@@ -413,21 +503,12 @@ impl ReadFilter {
     /// Reverse-reads tuples in `ns` whose subject is the userset. `rel`
     /// `None` means all relations.
     pub fn by_user_set(ns: Namespace, user_set: UserSet, rel: Option<Rel>) -> ReadFilter {
-        ReadFilter {
-            set: pb::TupleSet {
-                ns: ns.0,
-                spec: Some(pb::tuple_set::Spec::UsersetSpec(
-                    pb::tuple_set::UserSetSpec {
-                        user: Some(pb::tuple_set::user_set_spec::User::UserSet(pb::UserSet {
-                            ns: user_set.ns.0,
-                            obj: user_set.obj.0,
-                            rel: user_set.rel.0,
-                        })),
-                        rel: rel.map(|r| r.0),
-                    },
-                )),
-            },
-        }
+        let user = User::UserSet {
+            ns: user_set.ns,
+            obj: user_set.obj,
+            rel: user_set.rel,
+        };
+        Self::by_user(ns, user, rel)
     }
 }
 
@@ -512,14 +593,14 @@ impl CheckClient {
         self
     }
 
-    /// Calls the check server's Check API: may `user_id` — a principal UUID;
+    /// Calls the check server's Check API: may `user_id` — a principal;
     /// resolve session tokens to a principal client-side first (see
     /// [`crate::session`]) — exercise `rel` on ⟨ns, obj⟩? Evaluated at a
     /// snapshot at least as fresh as `timestamp` (a zookie from an earlier
-    /// write/read); `None` accepts any current snapshot. An unknown principal
-    /// maps to [`CheckResult::UnknownPutativeUser`], a known-but-unauthorized
-    /// user to [`CheckResult::Forbidden`]. [`Rel::IMPOSSIBLE`] short-circuits
-    /// to a denial (empty principal) without an RPC.
+    /// write/read); `None` accepts any current snapshot. An unauthorized user
+    /// maps to [`CheckResult::Forbidden`]. A response without a principal is
+    /// [`CallError::UnexpectedResponseFormat`]. [`Rel::IMPOSSIBLE`]
+    /// short-circuits to a denial without an RPC.
     pub async fn check(
         &mut self,
         ns: Namespace,
@@ -529,14 +610,14 @@ impl CheckClient {
         timestamp: Option<Timestamp>,
     ) -> Result<CheckResult, CallError> {
         if rel.0 == Rel::IMPOSSIBLE {
-            return Ok(CheckResult::Forbidden(String::new().into()));
+            return Ok(CheckResult::Forbidden(user_id.into()));
         }
         let r = pb::CheckRequest {
             ns: ns.0.clone(),
             obj: obj.0.clone(),
             rel: rel.0.clone(),
-            user_id: user_id.0.clone(),
-            ts: timestamp.unwrap_or_else(Timestamp::empty).0,
+            user: Some(pb::check_request::User::UserId(user_id.get())),
+            ts: timestamp.map(|t| t.0),
         };
         let started = std::time::Instant::now();
         let result = self.check.check(r).await;
@@ -552,28 +633,18 @@ impl CheckClient {
                 result.is_err(),
             );
         }
-        match result.map(|r| r.into_inner()) {
-            Ok(pb::CheckResponse {
-                principal: Some(pb::Principal { id }),
-                ok,
-            }) => {
-                if ok {
-                    Ok(CheckResult::Ok(id.into()))
-                } else {
-                    Ok(CheckResult::Forbidden(id.into()))
-                }
-            }
-            Ok(pb::CheckResponse {
-                principal: None,
-                ok: false,
-            }) => Ok(CheckResult::UnknownPutativeUser),
-            // ok without a principal is a contract violation (Go: ErrEmptyPrincipal).
-            Ok(pb::CheckResponse {
-                principal: None,
-                ok: true,
-            }) => Err(CallError::UnexpectedResponseFormat),
-            Err(status) => Err(status.into()),
-        }
+        let response = result?.into_inner();
+        let Some(principal) = response
+            .principal
+            .and_then(|p| UserId::try_from(p.id).ok())
+            .map(Principal::from)
+        else {
+            return Err(CallError::UnexpectedResponseFormat);
+        };
+        Ok(match response.ok {
+            true => CheckResult::Ok(principal),
+            false => CheckResult::Forbidden(principal),
+        })
     }
 
     /// Calls the check server's List API: the objects in `ns` on which the
@@ -591,8 +662,8 @@ impl CheckClient {
         let r = pb::ListRequest {
             ns: ns.0.clone(),
             rel: rel.0.clone(),
-            user_id: user_id.0.clone(),
-            ts: timestamp.unwrap_or_else(Timestamp::empty).0,
+            user: Some(pb::list_request::User::UserId(user_id.get())),
+            ts: timestamp.map(|t| t.0),
         };
         let started = std::time::Instant::now();
         let result = self.check.list(r).await;
@@ -624,24 +695,38 @@ impl CheckClient {
             ns: ns.0,
             obj: obj.0,
             rel: rel.0,
-            ts: timestamp.unwrap_or_else(Timestamp::empty).0,
+            ts: timestamp.map(|t| t.0),
         };
-        match self.check.expand(r).await.map(|r| r.into_inner()) {
-            Ok(response) => Ok(ExpandResult {
-                ts: Timestamp(response.ts),
-                user_ids: response.user_ids,
-                usersets: response
-                    .usersets
-                    .into_iter()
-                    .map(|us| UserSet {
-                        ns: Namespace(us.ns),
-                        obj: Obj(us.obj),
-                        rel: Rel(us.rel),
-                    })
-                    .collect(),
-            }),
-            Err(status) => Err(status.into()),
+        let response = self.check.expand(r).await?.into_inner();
+        let user_ids = response
+            .user_ids
+            .into_iter()
+            .map(UserId::try_from)
+            .collect::<Result<_, _>>()
+            .map_err(|e| ReadError::invalid_response(e.to_string()))?;
+        let mut all_users = false;
+        let mut authenticated_users = false;
+        for w in response.wildcards {
+            match wildcard_from_pb(w)? {
+                Wildcard::AllUsers => all_users = true,
+                Wildcard::AuthenticatedUsers => authenticated_users = true,
+            }
         }
+        Ok(ExpandResult {
+            ts: Timestamp(response.ts),
+            user_ids,
+            all_users,
+            authenticated_users,
+            usersets: response
+                .usersets
+                .into_iter()
+                .map(|us| UserSet {
+                    ns: Namespace(us.ns),
+                    obj: Obj(us.obj),
+                    rel: Rel(us.rel),
+                })
+                .collect(),
+        })
     }
 
     /// Authorizes a content modification against the freshest snapshot (never
@@ -658,7 +743,9 @@ impl CheckClient {
             ns: ns.0,
             obj: obj.0,
             rel: rel.0,
-            user_id: user_id.0,
+            user: Some(pb::content_change_check_request::User::UserId(
+                user_id.get(),
+            )),
         };
         match self
             .check
@@ -742,15 +829,15 @@ impl CheckClient {
         .await
     }
 
-    /// Reverse-reads tuples in `ns` whose subject is `user_id`. `rel` `None`
+    /// Reverse-reads tuples in `ns` whose subject is `user`. `rel` `None`
     /// means all relations. Answered via the reverse index — no rewrites.
     pub async fn read_by_user(
         &mut self,
         ns: &Namespace,
-        user_id: &UserId,
+        user: &User,
         rel: Option<Rel>,
     ) -> Result<ReadResult, ReadError> {
-        self.read(vec![ReadFilter::by_user(ns.clone(), user_id.clone(), rel)])
+        self.read(vec![ReadFilter::by_user(ns.clone(), user.clone(), rel)])
             .await
     }
 
@@ -862,19 +949,67 @@ impl CheckClient {
     }
 }
 
+/// Encodes a subject into one of the generated `oneof user` enums, which
+/// share the three variant shapes but are distinct types.
+fn user_to_pb<T>(
+    user: User,
+    user_id: fn(i64) -> T,
+    user_set: fn(pb::UserSet) -> T,
+    wildcard: fn(i32) -> T,
+) -> T {
+    match user {
+        User::UserId(id) => user_id(id.get()),
+        User::AllUsers => wildcard(pb::Wildcard::AllUsers.into()),
+        User::AuthenticatedUsers => wildcard(pb::Wildcard::AuthenticatedUsers.into()),
+        User::UserSet { ns, obj, rel } => user_set(pb::UserSet {
+            ns: ns.0,
+            obj: obj.0,
+            rel: rel.0,
+        }),
+    }
+}
+
+enum Wildcard {
+    AllUsers,
+    AuthenticatedUsers,
+}
+
+#[allow(clippy::result_large_err)]
+fn wildcard_from_pb(w: i32) -> Result<Wildcard, ReadError> {
+    match pb::Wildcard::try_from(w) {
+        Ok(pb::Wildcard::AllUsers) => Ok(Wildcard::AllUsers),
+        Ok(pb::Wildcard::AuthenticatedUsers) => Ok(Wildcard::AuthenticatedUsers),
+        Ok(pb::Wildcard::Unspecified) | Err(_) => {
+            Err(ReadError::invalid_response(format!("unknown wildcard {w}")))
+        }
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn user_from_pb(user: pb::tuple::User) -> Result<User, ReadError> {
+    match user {
+        pb::tuple::User::UserId(id) => UserId::try_from(id)
+            .map(User::UserId)
+            .map_err(|e| ReadError::invalid_response(e.to_string())),
+        pb::tuple::User::Wildcard(w) => Ok(match wildcard_from_pb(w)? {
+            Wildcard::AllUsers => User::AllUsers,
+            Wildcard::AuthenticatedUsers => User::AuthenticatedUsers,
+        }),
+        pb::tuple::User::UserSet(pb::UserSet { ns, obj, rel }) => Ok(User::UserSet {
+            ns: Namespace(ns),
+            obj: Obj(obj),
+            rel: Rel(rel),
+        }),
+    }
+}
+
 fn tuple_to_pb(t: Tuple) -> pb::Tuple {
+    use pb::tuple::User as Pb;
     pb::Tuple {
         ns: t.ns.0,
         obj: t.obj.0,
         rel: t.rel.0,
-        user: Some(match t.sbj {
-            User::UserId(user_id) => pb::tuple::User::UserId(user_id),
-            User::UserSet { ns, obj, rel } => pb::tuple::User::UserSet(pb::UserSet {
-                ns: ns.0,
-                obj: obj.0,
-                rel: rel.0,
-            }),
-        }),
+        user: Some(user_to_pb(t.sbj, Pb::UserId, Pb::UserSet, Pb::Wildcard)),
         condition: t.condition.map(|c| match c {
             Condition::Expires(exp) => pb::tuple::Condition::Expires(exp.timestamp()),
         }),
@@ -885,20 +1020,13 @@ fn tuple_to_pb(t: Tuple) -> pb::Tuple {
 /// violation — fail the call instead of panicking (NIO-003 / paper §2.4.2).
 #[allow(clippy::result_large_err)] // ReadError embeds tonic::Status by design
 fn tuple_from_pb(tup: pb::Tuple) -> Result<Tuple, ReadError> {
-    let sbj = match tup.user {
-        None => {
-            return Err(ReadError::invalid_response(format!(
-                "tuple {}:{}#{} missing user field",
-                tup.ns, tup.obj, tup.rel
-            )));
-        }
-        Some(pb::tuple::User::UserId(userid)) => User::UserId(userid),
-        Some(pb::tuple::User::UserSet(pb::UserSet { ns, obj, rel })) => User::UserSet {
-            ns: Namespace(ns),
-            obj: Obj(obj),
-            rel: Rel(rel),
-        },
+    let Some(user) = tup.user else {
+        return Err(ReadError::invalid_response(format!(
+            "tuple {}:{}#{} missing user field",
+            tup.ns, tup.obj, tup.rel
+        )));
     };
+    let sbj = user_from_pb(user)?;
     let condition = match tup.condition {
         None => None,
         Some(pb::tuple::Condition::Expires(secs)) => match DateTime::from_timestamp(secs, 0) {
@@ -947,6 +1075,20 @@ fn watch_event_from_pb(resp: pb::WatchResponse) -> Result<WatchEvent, ReadError>
 mod tests {
     use super::*;
 
+    fn uid(n: i64) -> UserId {
+        UserId::try_from(n).unwrap()
+    }
+
+    fn tuple_with(user: pb::tuple::User) -> pb::Tuple {
+        pb::Tuple {
+            ns: "doc".into(),
+            obj: "1".into(),
+            rel: "viewer".into(),
+            user: Some(user),
+            condition: None,
+        }
+    }
+
     #[test]
     fn timestamp_empty_is_packed_empty_zookie() {
         assert_eq!(Timestamp::empty().0, "AQAAAAAAAA==");
@@ -993,45 +1135,137 @@ mod tests {
         );
         assert_eq!(Rel::serviceaccount_key_get().0, "serviceaccount.key.get");
         assert_eq!(Rel::user_create().0, "user.create");
-        assert_eq!(UserId::all_users().0, "allUsers");
-        assert_eq!(UserId::authenticated_users().0, "authenticatedUsers");
+        assert_eq!(User::AllUsers.to_string(), "allUsers");
+        assert_eq!(User::AuthenticatedUsers.to_string(), "authenticatedUsers");
     }
 
     #[test]
-    fn tuple_to_pb_user_id() {
-        let pt = tuple_to_pb(Tuple::new(
+    fn user_id_accepts_max_i64() {
+        let id = UserId::from_str("9223372036854775807").unwrap();
+        assert_eq!(id.get(), 9223372036854775807);
+        assert_eq!(id.to_string(), "9223372036854775807");
+        assert_eq!(UserId::try_from("42".to_string()).unwrap().get(), 42);
+    }
+
+    #[test]
+    fn user_id_rejects_non_canonical_decimals() {
+        let not_decimal =
+            "invalid syntax: 'must be a decimal integer from 1 to 9223372036854775807'";
+        let error_of = |s: &str| UserId::from_str(s).unwrap_err().to_string();
+        assert_eq!(
+            error_of("0"),
+            format!("'0' has invalid syntax for UserId {not_decimal}")
+        );
+        assert_eq!(
+            error_of("-5"),
+            format!("'-5' has invalid syntax for UserId {not_decimal}")
+        );
+        assert_eq!(
+            error_of("01"),
+            format!("'01' has invalid syntax for UserId {not_decimal}")
+        );
+        assert_eq!(
+            error_of("9223372036854775808"),
+            "'9223372036854775808' has invalid syntax for UserId invalid syntax: 'exceeds 9223372036854775807'"
+        );
+        let uuid = ["812eebc6", "480b", "4527", "bed4", "057e4d2fd1e3"].join("-");
+        assert_eq!(
+            error_of(&uuid),
+            format!("'{uuid}' has invalid syntax for UserId {not_decimal}")
+        );
+    }
+
+    #[test]
+    fn user_id_try_from_i64_rejects_non_positive() {
+        let positive = "invalid syntax: 'must be a positive 64-bit integer'";
+        assert_eq!(
+            UserId::try_from(0).unwrap_err().to_string(),
+            format!("'0' has invalid syntax for UserId {positive}")
+        );
+        assert_eq!(
+            UserId::try_from(-5).unwrap_err().to_string(),
+            format!("'-5' has invalid syntax for UserId {positive}")
+        );
+    }
+
+    #[test]
+    fn user_parses_and_displays_every_subject_kind() {
+        let cases = [
+            ("42", User::UserId(uid(42))),
+            ("allUsers", User::AllUsers),
+            ("authenticatedUsers", User::AuthenticatedUsers),
+            (
+                "group:eng#member",
+                User::UserSet {
+                    ns: Namespace("group".into()),
+                    obj: Obj("eng".into()),
+                    rel: Rel("member".into()),
+                },
+            ),
+        ];
+        for (text, user) in cases {
+            assert_eq!(User::from_str(text).unwrap(), user);
+            assert_eq!(user.to_string(), text);
+        }
+    }
+
+    #[test]
+    fn user_rejects_bad_subjects() {
+        assert_eq!(
+            User::from_str("group#member").unwrap_err().to_string(),
+            "'group#member' has invalid syntax for User::UserSet invalid syntax: 'wrong pattern for userset: missing ':' delimiter'"
+        );
+        assert!(User::from_str("alice").is_err());
+    }
+
+    #[test]
+    fn tuple_display_uses_subject_text() {
+        let t = Tuple::new(
             Namespace("doc".into()),
             Obj("1".into()),
             Rel("viewer".into()),
-            User::UserId("u1".into()),
-        ));
+            User::AllUsers,
+        );
+        assert_eq!(t.to_string(), "Tuple(doc:1#viewer@allUsers)");
+    }
+
+    #[test]
+    fn tuple_to_pb_encodes_each_subject_kind() {
+        let encode = |sbj: User| {
+            tuple_to_pb(Tuple::new(
+                Namespace("doc".into()),
+                Obj("1".into()),
+                Rel("viewer".into()),
+                sbj,
+            ))
+        };
+        let pt = encode(User::UserId(uid(42)));
         assert_eq!(pt.ns, "doc");
         assert_eq!(pt.obj, "1");
         assert_eq!(pt.rel, "viewer");
-        assert!(matches!(pt.user, Some(pb::tuple::User::UserId(ref u)) if u == "u1"));
+        assert_eq!(pt.user, Some(pb::tuple::User::UserId(42)));
         assert!(pt.condition.is_none());
-    }
-
-    #[test]
-    fn tuple_to_pb_user_set() {
-        let pt = tuple_to_pb(Tuple::new(
-            Namespace("doc".into()),
-            Obj("1".into()),
-            Rel("viewer".into()),
-            User::UserSet {
+        assert_eq!(
+            encode(User::AllUsers).user,
+            Some(pb::tuple::User::Wildcard(1))
+        );
+        assert_eq!(
+            encode(User::AuthenticatedUsers).user,
+            Some(pb::tuple::User::Wildcard(2))
+        );
+        assert_eq!(
+            encode(User::UserSet {
                 ns: Namespace("group".into()),
                 obj: Obj("eng".into()),
                 rel: Rel("member".into()),
-            },
-        ));
-        match pt.user {
-            Some(pb::tuple::User::UserSet(us)) => {
-                assert_eq!(us.ns, "group");
-                assert_eq!(us.obj, "eng");
-                assert_eq!(us.rel, "member");
-            }
-            other => panic!("expected userset, got {other:?}"),
-        }
+            })
+            .user,
+            Some(pb::tuple::User::UserSet(pb::UserSet {
+                ns: "group".into(),
+                obj: "eng".into(),
+                rel: "member".into(),
+            }))
+        );
     }
 
     #[test]
@@ -1042,48 +1276,70 @@ mod tests {
                 Namespace("doc".into()),
                 Obj("1".into()),
                 Rel("viewer".into()),
-                User::UserId("u1".into()),
+                User::UserId(uid(1)),
             )
             .with_expires(exp),
         );
-        assert!(matches!(
+        assert_eq!(
             pt.condition,
             Some(pb::tuple::Condition::Expires(1894785600))
-        ));
+        );
     }
 
     #[test]
-    fn tuple_from_pb_maps_user_id_and_userset() {
-        let with_id = pb::Tuple {
-            ns: "coll".into(),
-            obj: "uk".into(),
-            rel: "owner".into(),
-            user: Some(pb::tuple::User::UserId("user-1".into())),
-            condition: None,
-        };
-        let t = tuple_from_pb(with_id).expect("userid tuple");
-        assert_eq!(t.ns.0, "coll");
-        assert_eq!(t.obj.0, "uk");
-        assert_eq!(t.rel.0, "owner");
-        assert!(matches!(t.sbj, User::UserId(ref s) if s == "user-1"));
+    fn tuple_from_pb_maps_each_subject_kind() {
+        let t = tuple_from_pb(tuple_with(pb::tuple::User::UserId(42))).unwrap();
+        assert_eq!(t.ns.0, "doc");
+        assert_eq!(t.obj.0, "1");
+        assert_eq!(t.rel.0, "viewer");
+        assert_eq!(t.sbj, User::UserId(uid(42)));
 
-        let with_set = pb::Tuple {
-            ns: "coll".into(),
-            obj: "uk".into(),
-            rel: "viewer".into(),
-            user: Some(pb::tuple::User::UserSet(pb::UserSet {
-                ns: "grp".into(),
-                obj: "eng".into(),
-                rel: "member".into(),
-            })),
-            condition: None,
-        };
-        let t = tuple_from_pb(with_set).expect("userset tuple");
-        assert!(matches!(
+        let t = tuple_from_pb(tuple_with(pb::tuple::User::Wildcard(
+            pb::Wildcard::AllUsers.into(),
+        )))
+        .unwrap();
+        assert_eq!(t.sbj, User::AllUsers);
+
+        let t = tuple_from_pb(tuple_with(pb::tuple::User::Wildcard(
+            pb::Wildcard::AuthenticatedUsers.into(),
+        )))
+        .unwrap();
+        assert_eq!(t.sbj, User::AuthenticatedUsers);
+
+        let t = tuple_from_pb(tuple_with(pb::tuple::User::UserSet(pb::UserSet {
+            ns: "grp".into(),
+            obj: "eng".into(),
+            rel: "member".into(),
+        })))
+        .unwrap();
+        assert_eq!(
             t.sbj,
-            User::UserSet { ref ns, ref obj, ref rel }
-                if ns.0 == "grp" && obj.0 == "eng" && rel.0 == "member"
-        ));
+            User::UserSet {
+                ns: Namespace("grp".into()),
+                obj: Obj("eng".into()),
+                rel: Rel("member".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn tuple_from_pb_rejects_unspecified_and_unknown_wildcards() {
+        let message = |user| match tuple_from_pb(tuple_with(user)) {
+            Err(ReadError::InvalidResponse(msg)) => msg,
+            other => panic!("expected InvalidResponse, got {other:?}"),
+        };
+        assert_eq!(
+            message(pb::tuple::User::Wildcard(pb::Wildcard::Unspecified.into())),
+            "unknown wildcard 0"
+        );
+        assert_eq!(
+            message(pb::tuple::User::Wildcard(99)),
+            "unknown wildcard 99"
+        );
+        assert_eq!(
+            message(pb::tuple::User::UserId(0)),
+            "'0' has invalid syntax for UserId invalid syntax: 'must be a positive 64-bit integer'"
+        );
     }
 
     #[test]
@@ -1095,13 +1351,11 @@ mod tests {
             user: None,
             condition: None,
         };
-        let err = tuple_from_pb(bare).expect_err("missing user must fail");
-        match err {
-            ReadError::InvalidResponse(msg) => {
-                assert!(msg.contains("missing user"), "msg={msg}");
-                assert!(msg.contains("coll"));
+        match tuple_from_pb(bare) {
+            Err(ReadError::InvalidResponse(msg)) => {
+                assert_eq!(msg, "tuple coll:uk#owner missing user field")
             }
-            ReadError::Grpc(_) => panic!("expected InvalidResponse, got Grpc"),
+            other => panic!("expected InvalidResponse, got {other:?}"),
         }
     }
 
@@ -1112,7 +1366,7 @@ mod tests {
             Namespace("doc".into()),
             Obj("1".into()),
             Rel("viewer".into()),
-            User::UserId("u1".into()),
+            User::UserId(uid(1)),
         )
         .with_expires(exp);
         let back = tuple_from_pb(tuple_to_pb(t)).expect("round trip");
@@ -1126,53 +1380,52 @@ mod tests {
     fn filter_by_object() {
         let f = ReadFilter::by_object(Namespace("doc".into()), Obj("1".into()), None);
         assert_eq!(f.set.ns, "doc");
-        match f.set.spec {
-            Some(pb::tuple_set::Spec::ObjectSpec(ref os)) => {
-                assert_eq!(os.obj, "1");
-                assert!(os.rel.is_none());
-            }
-            ref other => panic!("expected object spec, got {other:?}"),
-        }
+        assert_eq!(
+            f.set.spec,
+            Some(pb::tuple_set::Spec::ObjectSpec(pb::tuple_set::ObjectSpec {
+                obj: "1".into(),
+                rel: None,
+            }))
+        );
 
         let f = ReadFilter::by_object(
             Namespace("doc".into()),
             Obj("1".into()),
             Some(Rel::viewer()),
         );
-        match f.set.spec {
-            Some(pb::tuple_set::Spec::ObjectSpec(ref os)) => {
-                assert_eq!(os.rel.as_deref(), Some("viewer"));
-            }
-            ref other => panic!("expected object spec, got {other:?}"),
-        }
+        assert_eq!(
+            f.set.spec,
+            Some(pb::tuple_set::Spec::ObjectSpec(pb::tuple_set::ObjectSpec {
+                obj: "1".into(),
+                rel: Some("viewer".into()),
+            }))
+        );
     }
 
     #[test]
     fn filter_by_user() {
-        let f = ReadFilter::by_user(Namespace("doc".into()), UserId("u1".into()), None);
-        assert_eq!(f.set.ns, "doc");
-        match f.set.spec {
-            Some(pb::tuple_set::Spec::UsersetSpec(ref us)) => {
-                assert!(matches!(
-                    us.user,
-                    Some(pb::tuple_set::user_set_spec::User::UserId(ref u)) if u == "u1"
-                ));
-                assert!(us.rel.is_none());
-            }
-            ref other => panic!("expected userset spec, got {other:?}"),
-        }
-
-        let f = ReadFilter::by_user(
-            Namespace("doc".into()),
-            UserId("u1".into()),
-            Some(Rel::editor()),
+        use pb::tuple_set::user_set_spec::User as Pb;
+        let spec = |user, rel| {
+            ReadFilter::by_user(Namespace("doc".into()), user, rel)
+                .set
+                .spec
+        };
+        let expected = |user, rel: Option<&str>| {
+            Some(pb::tuple_set::Spec::UsersetSpec(
+                pb::tuple_set::UserSetSpec {
+                    user: Some(user),
+                    rel: rel.map(String::from),
+                },
+            ))
+        };
+        assert_eq!(
+            spec(User::UserId(uid(42)), None),
+            expected(Pb::UserId(42), None)
         );
-        match f.set.spec {
-            Some(pb::tuple_set::Spec::UsersetSpec(ref us)) => {
-                assert_eq!(us.rel.as_deref(), Some("editor"));
-            }
-            ref other => panic!("expected userset spec, got {other:?}"),
-        }
+        assert_eq!(
+            spec(User::AuthenticatedUsers, Some(Rel::editor())),
+            expected(Pb::Wildcard(2), Some("editor"))
+        );
     }
 
     #[test]
@@ -1186,17 +1439,19 @@ mod tests {
             },
             None,
         );
-        match f.set.spec {
-            Some(pb::tuple_set::Spec::UsersetSpec(ref us)) => match us.user {
-                Some(pb::tuple_set::user_set_spec::User::UserSet(ref set)) => {
-                    assert_eq!(set.ns, "grp");
-                    assert_eq!(set.obj, "eng");
-                    assert_eq!(set.rel, "member");
-                }
-                ref other => panic!("expected userset subject, got {other:?}"),
-            },
-            ref other => panic!("expected userset spec, got {other:?}"),
-        }
+        assert_eq!(
+            f.set.spec,
+            Some(pb::tuple_set::Spec::UsersetSpec(
+                pb::tuple_set::UserSetSpec {
+                    user: Some(pb::tuple_set::user_set_spec::User::UserSet(pb::UserSet {
+                        ns: "grp".into(),
+                        obj: "eng".into(),
+                        rel: "member".into(),
+                    })),
+                    rel: None,
+                },
+            ))
+        );
     }
 
     #[test]
@@ -1212,27 +1467,17 @@ mod tests {
 
     #[test]
     fn watch_event_from_pb_atomic_write() {
+        let mut editor = tuple_with(pb::tuple::User::UserId(7));
+        editor.rel = "editor".into();
         let ev = watch_event_from_pb(pb::WatchResponse {
             ts: "commit-ts".into(),
             updates: vec![
                 pb::Update {
-                    tuple: Some(pb::Tuple {
-                        ns: "doc".into(),
-                        obj: "1".into(),
-                        rel: "viewer".into(),
-                        user: Some(pb::tuple::User::UserId("u1".into())),
-                        condition: None,
-                    }),
+                    tuple: Some(tuple_with(pb::tuple::User::UserId(7))),
                     deleted: false,
                 },
                 pb::Update {
-                    tuple: Some(pb::Tuple {
-                        ns: "doc".into(),
-                        obj: "1".into(),
-                        rel: "editor".into(),
-                        user: Some(pb::tuple::User::UserId("u1".into())),
-                        condition: None,
-                    }),
+                    tuple: Some(editor),
                     deleted: true,
                 },
             ],
@@ -1241,23 +1486,19 @@ mod tests {
         assert_eq!(ev.ts.0, "commit-ts");
         assert_eq!(ev.updates.len(), 2);
         assert!(!ev.updates[0].deleted);
-        assert!(matches!(ev.updates[0].tuple.sbj, User::UserId(ref u) if u == "u1"));
+        assert_eq!(ev.updates[0].tuple.sbj, User::UserId(uid(7)));
         assert!(ev.updates[1].deleted);
         assert_eq!(ev.updates[1].tuple.rel.0, "editor");
     }
 
     #[test]
     fn watch_event_from_pb_missing_tuple_user() {
+        let mut bare = tuple_with(pb::tuple::User::UserId(7));
+        bare.user = None;
         let err = watch_event_from_pb(pb::WatchResponse {
             ts: "t".into(),
             updates: vec![pb::Update {
-                tuple: Some(pb::Tuple {
-                    ns: "doc".into(),
-                    obj: "1".into(),
-                    rel: "viewer".into(),
-                    user: None,
-                    condition: None,
-                }),
+                tuple: Some(bare),
                 deleted: false,
             }],
         })

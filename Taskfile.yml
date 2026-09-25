@@ -63,7 +63,7 @@ tasks:
       - cargo run --example list -- {{.CLI_ARGS}}
 
   example-write:
-    desc: "Run the write example: task example-write -- <ns> <obj> <rel> <userid-or-ns:obj#rel> (needs NIO_CHECK_URI)"
+    desc: "Run the write example: task example-write -- <ns> <obj> <rel> <userid|allUsers|authenticatedUsers|ns:obj#rel> (needs NIO_CHECK_URI)"
     cmds:
       - cargo run --example write -- {{.CLI_ARGS}}
 

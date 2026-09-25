@@ -1,48 +1,26 @@
+use crate::UserId;
+use std::fmt::{Display, Formatter};
 use tonic::Status;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Principal(String);
-
-/// The principal used for resources that do not require a session.
-pub const ANONYMOUS: &str = "anonymous";
+/// The principal a `check` decision applies to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Principal(UserId);
 
 impl Principal {
-    pub fn anonymous() -> Principal {
-        Principal(ANONYMOUS.into())
-    }
-
-    pub fn is_anonymous(&self) -> bool {
-        self.0 == ANONYMOUS
-    }
-
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
+    pub fn user_id(&self) -> UserId {
+        self.0
     }
 }
 
-impl AsRef<str> for Principal {
-    fn as_ref(&self) -> &str {
-        self.0.as_ref()
-    }
-}
-
-impl From<String> for Principal {
-    fn from(value: String) -> Self {
+impl From<UserId> for Principal {
+    fn from(value: UserId) -> Self {
         Principal(value)
     }
 }
 
-impl From<Principal> for String {
-    #[inline]
-    fn from(value: Principal) -> String {
-        value.0
-    }
-}
-
-impl From<&Principal> for String {
-    #[inline]
-    fn from(value: &Principal) -> String {
-        value.0.clone()
+impl Display for Principal {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
     }
 }
 
@@ -50,7 +28,6 @@ impl From<&Principal> for String {
 pub enum CheckResult {
     Ok(Principal),
     Forbidden(Principal),
-    UnknownPutativeUser,
 }
 
 impl CheckResult {

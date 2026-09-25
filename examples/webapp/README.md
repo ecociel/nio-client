@@ -31,8 +31,8 @@ as relationship **tuples** and evaluated on demand.
 | **Namespace** | A kind of object | `article` |
 | **Object** | One thing in a namespace | `article:1` |
 | **Relation** | A verb / permission on an object | `article.get`, `article.update` |
-| **Tuple** | `namespace:object#relation@subject` — one stored grant | `article:1#article.get@alice` |
-| **Principal** | The subject a check runs against | alice's UUID |
+| **Tuple** | `namespace:object#relation@subject` — one stored grant | `article:1#article.get@1001` |
+| **Principal** | The subject a check runs against: a positive 64-bit user ID | alice is `1001`, bob is `1002` |
 
 A **check** answers one yes/no question: *does `subject` hold `relation` on
 `namespace:object`?* The client never sends a raw password or token to the
@@ -72,7 +72,7 @@ identically:
 
 The **raw token never leaves the process** and is **never sent to the check** —
 only its `sha256` hash goes to the session service, and only the resolved
-principal UUID goes to the check. If a token is unknown/expired/revoked, the
+principal's user ID goes to the check. If a token is unknown/expired/revoked, the
 request is rejected with **zero** check RPCs.
 
 ### The request lifecycle inside an extractor
@@ -167,9 +167,9 @@ curl -b bob.jar   -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/article
 ```
 
 ```
-[nio session] resolve(1c96bd28…) -> …-alice   (resolved once, then cached ~30s)
-[nio check]   article:1#article.get @ …-alice -> ALLOW
-[nio check]   article:1#article.get @ …-bob   -> DENY
+[nio session] resolve(ab0db397…) -> 1001 (alice)   (resolved once, then cached ~30s)
+[nio check]   article:1#article.get @ 1001 (alice) -> ALLOW
+[nio check]   article:1#article.get @ 1002 (bob) -> DENY
 ```
 
 Note: resolution is **cached** (the resolver's L1 tier), so a burst of requests
@@ -179,7 +179,7 @@ on one session triggers **one** resolve but a check **per request**.
 
 ```
 TOKEN=<the 64-hex token from step B>
-curl -H "Authorization: Bearer $TOKEN"        http://127.0.0.1:8080/api/articles/1   # 200 view
+curl -H "Authorization: Bearer $TOKEN"        http://127.0.0.1:8080/api/articles/1   # 200, "principal":"1001"
 curl -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:8080/api/articles/2   # 403
 ```
 
@@ -187,7 +187,7 @@ curl -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:8080/api/article
 article 2 but not update it — she is a reader, not an editor:
 
 ```
-[nio check]   article:2#article.update @ …-alice -> DENY
+[nio check]   article:2#article.update @ 1001 (alice) -> DENY
 ```
 
 ### E. Public page with optional auth
@@ -212,8 +212,8 @@ Sign-out drops the session at the source **and** evicts it from the resolver's
 cache, so the next resolve is immediate:
 
 ```
-[app] signed out -> session 1c96bd28… revoked
-[nio session] resolve(1c96bd28…) -> NOT FOUND
+[app] signed out -> session ab0db397… revoked
+[nio session] resolve(ab0db397…) -> NOT FOUND
 ```
 
 ---
