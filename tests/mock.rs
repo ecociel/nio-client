@@ -294,46 +294,32 @@ async fn check_forbidden_and_unknown_user() {
         .await
         .expect("check");
     assert!(matches!(res, CheckResult::Forbidden(p) if p.user_id() == uid(42)));
-
-    mock.lock().check_response = Some(wire::CheckResponse {
-        principal: None,
-        ok: false,
-    });
-    let res = c
-        .check(
-            Namespace("doc".into()),
-            Obj("1".into()),
-            Rel::viewer(),
-            uid(99),
-            None,
-        )
-        .await
-        .expect("check");
-    assert!(matches!(res, CheckResult::UnknownPutativeUser));
 }
 
 #[tokio::test]
-async fn check_ok_without_principal_is_error() {
+async fn check_without_principal_is_error() {
     let (mock, uri) = start_mock().await;
-    mock.lock().check_response = Some(wire::CheckResponse {
-        principal: None,
-        ok: true,
-    });
     let mut c = client(uri).await;
-    let err = c
-        .check(
-            Namespace("doc".into()),
-            Obj("1".into()),
-            Rel::viewer(),
-            uid(1),
-            None,
-        )
-        .await
-        .expect_err("ok without principal must be an error");
-    assert!(matches!(
-        err,
-        nio_client::auth::CallError::UnexpectedResponseFormat
-    ));
+    for ok in [true, false] {
+        mock.lock().check_response = Some(wire::CheckResponse {
+            principal: None,
+            ok,
+        });
+        let err = c
+            .check(
+                Namespace("doc".into()),
+                Obj("1".into()),
+                Rel::viewer(),
+                uid(1),
+                None,
+            )
+            .await
+            .expect_err("a response without a principal must be an error");
+        assert!(matches!(
+            err,
+            nio_client::auth::CallError::UnexpectedResponseFormat
+        ));
+    }
 }
 
 #[tokio::test]

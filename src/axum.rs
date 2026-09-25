@@ -59,6 +59,10 @@ enum Subject {
     Error(WebResourceError),
 }
 
+/// Turn a raw token into a `check` subject: hash it in-process and resolve it
+/// to a principal via the [`SessionResolver`] (the raw token never
+/// reaches `check` — #243). `not_found` yields zero `check` RPCs; a
+/// backend/transport fault is surfaced as an internal error.
 async fn resolve_subject(resolver: &Arc<dyn SessionResolver>, token: &str) -> Subject {
     let hash = crate::session::token_hash(token);
     match resolver.resolve(&hash).await {
@@ -186,7 +190,6 @@ where
                 }),
                 // TODO consider passing along principal even when not authorized
                 Ok(CheckResult::Forbidden(_)) => Err(WebResourceError::Forbidden),
-                Ok(CheckResult::UnknownPutativeUser) => Err(WebResourceError::Forbidden),
             }
         }
     }
@@ -243,7 +246,6 @@ where
                     auth_type: PhantomData,
                 }),
                 Ok(CheckResult::Forbidden(_)) => Err(WebResourceError::Forbidden),
-                Ok(CheckResult::UnknownPutativeUser) => Err(WebResourceError::Forbidden),
             }
         }
     }
@@ -354,7 +356,6 @@ where
                     resource,
                 }),
                 Ok(CheckResult::Forbidden(_)) => Err(WebResourceError::Forbidden),
-                Ok(CheckResult::UnknownPutativeUser) => Err(WebResourceError::Forbidden),
             }
         }
     }

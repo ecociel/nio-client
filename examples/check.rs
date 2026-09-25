@@ -39,10 +39,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Denied: {} for user {} in namespace {} on object {}",
             rel.0, p, ns.0, obj.0
         ),
-        CheckResult::UnknownPutativeUser => println!(
-            "Unknown user: {} in namespace {} on object {}",
-            userid, ns.0, obj.0
-        ),
     }
 
     Ok(())

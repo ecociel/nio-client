@@ -41,7 +41,7 @@ struct Grant {
     ns: String,
     obj: String,
     rel: String,
-    subject: String,
+    subject: User,
 }
 
 #[derive(Default)]
@@ -78,7 +78,7 @@ impl Backend {
             ns: ns.to_string(),
             obj: obj.to_string(),
             rel: rel.to_string(),
-            subject: subject.to_string(),
+            subject,
         });
     }
 
@@ -192,24 +192,12 @@ impl wire::check_service_server::CheckService for Backend {
             ns: req.ns.clone(),
             obj: req.obj.clone(),
             rel: req.rel.clone(),
-            subject: subject.to_string(),
+            subject,
         };
         let granted = state.tuples.contains(&key(user_id.into()));
         let public = state.tuples.contains(&key(User::AllUsers));
-        let known = state.names.contains_key(&user_id);
         let allowed = granted || public;
-
-        // Response contract (see CheckClient::check): a known principal always
-        // carries its id back; an entirely unknown principal with no public
-        // grant is reported as "unknown putative user" (principal = None).
-        let (principal, verdict) = if known || granted || public {
-            (
-                Some(wire::Principal { id: user_id.get() }),
-                if allowed { "ALLOW" } else { "DENY" },
-            )
-        } else {
-            (None, "UNKNOWN USER")
-        };
+        let verdict = if allowed { "ALLOW" } else { "DENY" };
 
         let name = state
             .names
@@ -222,7 +210,7 @@ impl wire::check_service_server::CheckService for Backend {
         );
 
         Ok(Response::new(wire::CheckResponse {
-            principal,
+            principal: Some(wire::Principal { id: user_id.get() }),
             ok: allowed,
         }))
     }

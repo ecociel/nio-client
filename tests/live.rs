@@ -41,7 +41,6 @@ async fn check() {
     match res {
         CheckResult::Ok(p) => println!("ok {p}"),
         CheckResult::Forbidden(p) => println!("forbidden {p}"),
-        CheckResult::UnknownPutativeUser => println!("unknown user"),
     }
 }
 

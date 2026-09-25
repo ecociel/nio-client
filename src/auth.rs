@@ -2,7 +2,7 @@ use crate::UserId;
 use std::fmt::{Display, Formatter};
 use tonic::Status;
 
-/// The subject a `check` call was made for, as the server echoed it back.
+/// The principal a `check` decision applies to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Principal(UserId);
 
@@ -28,7 +28,6 @@ impl Display for Principal {
 pub enum CheckResult {
     Ok(Principal),
     Forbidden(Principal),
-    UnknownPutativeUser,
 }
 
 impl CheckResult {

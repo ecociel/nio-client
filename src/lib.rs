@@ -4,11 +4,11 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::auth::{CallError, CheckResult};
+use crate::auth::{CallError, CheckResult, Principal};
 use crate::error::ReadError;
 use chrono::{DateTime, Utc};
-pub use error::ConnectError;
-use error::{ParseError, WriteError};
+use error::WriteError;
+pub use error::{ConnectError, ParseError};
 use http::Uri;
 use tonic::transport::{Channel, ClientTlsConfig};
 
@@ -20,7 +20,7 @@ pub mod memo;
 pub mod session;
 
 /// Ns is a collection of objects.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Namespace(pub String);
 
 /// Built-in namespaces (nio domain / check bootstrap): `iam` and
@@ -38,7 +38,7 @@ impl Namespace {
 }
 
 /// Rel is a relation (or computed permission) on an object.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Rel(pub String);
 
 /// Built-in relations (nio domain / check bootstrap). Roles
@@ -207,7 +207,7 @@ impl Timestamp {
 }
 
 /// Obj is an object.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Obj(pub String);
 
 /// `root` is the singleton object of the iam namespace; `...` is the pointer
@@ -248,7 +248,7 @@ pub struct UserSet {
 }
 
 /// The subject of a tuple: one principal, a public wildcard, or a userset.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum User {
     UserId(UserId),
     AllUsers,
@@ -299,6 +299,14 @@ impl Display for User {
             User::AuthenticatedUsers => f.write_str(Self::AUTHENTICATED_USERS),
             User::UserSet { ns, obj, rel } => write!(f, "{}:{}#{}", ns.0, obj.0, rel.0),
         }
+    }
+}
+
+impl TryFrom<String> for User {
+    type Error = ParseError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        User::from_str(&value)
     }
 }
 
@@ -589,10 +597,10 @@ impl CheckClient {
     /// resolve session tokens to a principal client-side first (see
     /// [`crate::session`]) — exercise `rel` on ⟨ns, obj⟩? Evaluated at a
     /// snapshot at least as fresh as `timestamp` (a zookie from an earlier
-    /// write/read); `None` accepts any current snapshot. An unknown principal
-    /// maps to [`CheckResult::UnknownPutativeUser`], a known-but-unauthorized
-    /// user to [`CheckResult::Forbidden`]. [`Rel::IMPOSSIBLE`] short-circuits
-    /// to a denial without an RPC.
+    /// write/read); `None` accepts any current snapshot. An unauthorized user
+    /// maps to [`CheckResult::Forbidden`]. A response without a principal is
+    /// [`CallError::UnexpectedResponseFormat`]. [`Rel::IMPOSSIBLE`]
+    /// short-circuits to a denial without an RPC.
     pub async fn check(
         &mut self,
         ns: Namespace,
@@ -625,30 +633,18 @@ impl CheckClient {
                 result.is_err(),
             );
         }
-        match result.map(|r| r.into_inner()) {
-            Ok(pb::CheckResponse {
-                principal: Some(pb::Principal { id }),
-                ok,
-            }) => {
-                let principal = UserId::try_from(id)
-                    .map_err(|_| CallError::UnexpectedResponseFormat)?
-                    .into();
-                match ok {
-                    true => Ok(CheckResult::Ok(principal)),
-                    false => Ok(CheckResult::Forbidden(principal)),
-                }
-            }
-            Ok(pb::CheckResponse {
-                principal: None,
-                ok: false,
-            }) => Ok(CheckResult::UnknownPutativeUser),
-            // ok without a principal is a contract violation (Go: ErrEmptyPrincipal).
-            Ok(pb::CheckResponse {
-                principal: None,
-                ok: true,
-            }) => Err(CallError::UnexpectedResponseFormat),
-            Err(status) => Err(status.into()),
-        }
+        let response = result?.into_inner();
+        let Some(principal) = response
+            .principal
+            .and_then(|p| UserId::try_from(p.id).ok())
+            .map(Principal::from)
+        else {
+            return Err(CallError::UnexpectedResponseFormat);
+        };
+        Ok(match response.ok {
+            true => CheckResult::Ok(principal),
+            false => CheckResult::Forbidden(principal),
+        })
     }
 
     /// Calls the check server's List API: the objects in `ns` on which the
