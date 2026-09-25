@@ -6,20 +6,35 @@ package am;
 import "google/protobuf/empty.proto";
 
 message Principal {
-  string id = 1;
+  reserved 1;
+  int64 id = 2;
+}
+
+enum Wildcard {
+  WILDCARD_UNSPECIFIED = 0;
+  ALL_USERS = 1;
+  AUTHENTICATED_USERS = 2;
 }
 
 message CheckRequest {
   string ns = 1;
   string obj = 2;
   string rel = 3;
-  string userId = 4;
-  // Opaque zookie: standard Base64 of [epoch:u8][millis:u48 BE] (7 bytes).
-  // Store and echo only; do not invent. Empty/default: pack of epoch=1, ms=0.
-  string ts = 5;
+  reserved 4;
+  oneof user {
+    int64 userId = 8;
+    UserSet userSet = 6;
+    Wildcard wildcard = 7;
+  }
+  // Optional opaque zookie: standard Base64 of [epoch:u8][millis:u48 BE]
+  // (7 bytes). Store and echo only; do not invent. Unset and the empty string
+  // both mean the default snapshot (the pack of epoch=1, ms=0, which the
+  // server resolves to its quantized default staleness).
+  optional string ts = 5;
 }
 
 message CheckResponse {
+  // Set when the request subject is a userId.
   optional Principal principal = 1;
   bool ok = 2;
 }
@@ -28,7 +43,12 @@ message ContentChangeCheckRequest {
   string ns = 1;
   string obj = 2;
   string rel = 3;
-  string userId = 4;
+  reserved 4;
+  oneof user {
+    int64 userId = 7;
+    UserSet userSet = 5;
+    Wildcard wildcard = 6;
+  }
 }
 message ContentChangeCheckResponse {
   bool ok = 2;
@@ -39,9 +59,15 @@ message ContentChangeCheckResponse {
 message ListRequest {
   string ns = 1;
   string rel = 3;
-  string userId = 4;
-  // Opaque zookie (see CheckRequest.ts).
-  string ts = 5;
+  reserved 4;
+  oneof user {
+    int64 userId = 8;
+    UserSet userSet = 6;
+    Wildcard wildcard = 7;
+  }
+  // Optional opaque zookie (see CheckRequest.ts). Unset and the empty string
+  // both mean the default snapshot.
+  optional string ts = 5;
 }
 
 message ListResponse {
@@ -55,15 +81,18 @@ message ExpandRequest {
   string ns = 1;
   string obj = 2;
   string rel = 3;
-  // Opaque zookie (see CheckRequest.ts).
-  string ts = 4;
+  // Optional opaque zookie (see CheckRequest.ts). Unset and the empty string
+  // both mean the default snapshot.
+  optional string ts = 4;
 }
 
 message ExpandResponse {
   // Opaque packed evaluation snapshot zookie.
   string ts = 1;
-  repeated string userIds = 2;
+  reserved 2;
+  repeated int64 userIds = 5;
   repeated UserSet usersets = 3;
+  repeated Wildcard wildcards = 4;
 }
 
 service CheckService {
@@ -87,9 +116,11 @@ message Tuple {
   string ns = 1;
   string obj = 2;
   string rel = 3;
+  reserved 4;
   oneof user {
-    string userId = 4;
+    int64 userId = 8;
     UserSet userSet = 5;
+    Wildcard wildcard = 7;
   }
   oneof condition {
     int64 expires = 6;
@@ -101,9 +132,11 @@ message TupleSet {
   message TupleSpec {
     string obj = 1;
     string rel = 2;
+    reserved 3;
     oneof user {
-      string user_id = 3;
+      int64 user_id = 6;
       UserSet user_set = 4;
+      Wildcard wildcard = 5;
     }
   }
   message ObjectSpec {
@@ -114,9 +147,11 @@ message TupleSet {
   // user or userset. Optional `rel` restricts to one relation; omit for all.
   // Answered via the reverse index — raw stored edges, no rewrite evaluation.
   message UserSetSpec {
+    reserved 1;
     oneof user {
-      string user_id = 1;
+      int64 user_id = 5;
       UserSet user_set = 2;
+      Wildcard wildcard = 4;
     }
     optional string rel = 3;
   }

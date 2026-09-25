@@ -60,13 +60,13 @@ enum Subject {
 }
 
 /// Turn a raw token into a `check` subject: hash it in-process and resolve it
-/// to a principal UUID via the [`SessionResolver`] (the raw token never
+/// to a principal via the [`SessionResolver`] (the raw token never
 /// reaches `check` — #243). `not_found` yields zero `check` RPCs; a
 /// backend/transport fault is surfaced as an internal error.
 async fn resolve_subject(resolver: &Arc<dyn SessionResolver>, token: &str) -> Subject {
     let hash = crate::session::token_hash(token);
     match resolver.resolve(&hash).await {
-        Ok(Some(session)) => Subject::Principal(UserId(session.principal)),
+        Ok(Some(session)) => Subject::Principal(session.principal),
         Ok(None) => Subject::NotFound,
         Err(err) => {
             log::error!("nio-client: session resolve failed: {err}");

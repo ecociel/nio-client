@@ -5,16 +5,26 @@ use tonic::Status;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ParseErrorKind {
-    #[error("invalid syntax")]
-    InvalidSyntaxWithInner(#[from] Box<dyn std::error::Error + Send + Sync>),
+    #[error("invalid syntax: '{0}'")]
+    InvalidSyntax(String),
 }
 
 #[derive(thiserror::Error, Debug)]
-#[error("'{value}' has invalid syntax for {item}")]
+#[error("'{value}' has invalid syntax for {item} {source}")]
 pub struct ParseError {
     item: String,
     value: String,
     source: ParseErrorKind,
+}
+
+impl ParseError {
+    pub(crate) fn invalid_syntax(item: &str, value: impl Into<String>, reason: &str) -> Self {
+        ParseError {
+            item: item.into(),
+            value: value.into(),
+            source: ParseErrorKind::InvalidSyntax(reason.into()),
+        }
+    }
 }
 
 #[derive(Debug)]

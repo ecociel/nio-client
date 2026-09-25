@@ -22,8 +22,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::OnceCell;
 
-type CheckKey = (String, String, String, String);
-type ListKey = (String, String, String);
+type CheckKey = (String, String, String, UserId);
+type ListKey = (String, String, UserId);
 
 pub type MemoObserveFn = Arc<dyn Fn(&str, bool) + Send + Sync>;
 
@@ -78,12 +78,7 @@ impl RequestMemo {
         rel: Rel,
         user_id: UserId,
     ) -> Result<CheckResult, CallError> {
-        let key = (
-            ns.0.clone(),
-            obj.0.clone(),
-            rel.0.clone(),
-            user_id.0.clone(),
-        );
+        let key = (ns.0.clone(), obj.0.clone(), rel.0.clone(), user_id);
         let cell = {
             let mut map = self.checks.lock().expect("memo mutex poisoned");
             map.entry(key).or_default().clone()
@@ -105,7 +100,7 @@ impl RequestMemo {
         rel: Rel,
         user_id: UserId,
     ) -> Result<ListResult, CallError> {
-        let key = (ns.0.clone(), rel.0.clone(), user_id.0.clone());
+        let key = (ns.0.clone(), rel.0.clone(), user_id);
         let cell = {
             let mut map = self.lists.lock().expect("memo mutex poisoned");
             map.entry(key).or_default().clone()

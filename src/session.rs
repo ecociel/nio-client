@@ -12,6 +12,7 @@
 
 use crate::pb::session_service_client::SessionServiceClient;
 use crate::pb::{resolve_response, ResolveRequest};
+use crate::UserId;
 use chrono::{DateTime, Utc};
 use futures::future::{BoxFuture, FutureExt, Shared};
 use sha2::{Digest, Sha256};
@@ -47,11 +48,11 @@ impl TokenHash {
     }
 }
 
-/// A resolved session: the principal UUID, its tenant, and the wall-clock
+/// A resolved session: the principal, its tenant, and the wall-clock
 /// instant the session stops being valid.
 #[derive(Clone, Debug)]
 pub struct ResolvedSession {
-    pub principal: String,
+    pub principal: UserId,
     pub tenant_id: String,
     pub expires_at: DateTime<Utc>,
 }
@@ -469,7 +470,8 @@ impl SessionFetcher for GrpcFetcher {
                 .map_err(classify_status)?;
             match resp.into_inner().outcome {
                 Some(resolve_response::Outcome::Session(s)) => Ok(Some(ResolvedSession {
-                    principal: s.principal,
+                    principal: UserId::try_from(s.principal)
+                        .map_err(|e| ResolveError::Backend(e.to_string()))?,
                     tenant_id: s.tenant_id,
                     expires_at: DateTime::from_timestamp(s.expires_at_unix_seconds, 0)
                         .unwrap_or_else(Utc::now),
@@ -521,7 +523,7 @@ mod tests {
 
     fn session_valid_for(mins: i64) -> ResolvedSession {
         ResolvedSession {
-            principal: "11111111-1111-1111-1111-111111111111".to_string(),
+            principal: UserId::try_from(42).unwrap(),
             tenant_id: String::new(),
             expires_at: Utc::now() + chrono::TimeDelta::minutes(mins),
         }
