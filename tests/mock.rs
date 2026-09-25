@@ -35,8 +35,10 @@ struct MockState {
     ccc_response: Option<wire::ContentChangeCheckResponse>,
     read_requests: Vec<wire::ReadRequest>,
     read_response: Option<wire::ReadResponse>,
+    read_error: Option<Status>,
     write_requests: Vec<wire::WriteRequest>,
     write_response: Option<wire::WriteResponse>,
+    write_error: Option<Status>,
     watch_requests: Vec<wire::WatchRequest>,
     watch_responses: Vec<wire::WatchResponse>,
     namespaces: Vec<wire::NamespaceMeta>,
@@ -119,6 +121,9 @@ impl wire::check_service_server::CheckService for Mock {
     ) -> Result<Response<wire::ReadResponse>, Status> {
         let mut state = self.lock();
         state.read_requests.push(request.into_inner());
+        if let Some(status) = state.read_error.take() {
+            return Err(status);
+        }
         Ok(Response::new(
             state.read_response.clone().unwrap_or_default(),
         ))
@@ -130,6 +135,9 @@ impl wire::check_service_server::CheckService for Mock {
     ) -> Result<Response<wire::WriteResponse>, Status> {
         let mut state = self.lock();
         state.write_requests.push(request.into_inner());
+        if let Some(status) = state.write_error.take() {
+            return Err(status);
+        }
         Ok(Response::new(
             state.write_response.clone().unwrap_or_default(),
         ))
@@ -1127,6 +1135,39 @@ async fn add_many_commits_one_atomic_write() {
     let reqs = mock.lock().write_requests.clone();
     assert_eq!(reqs.len(), 1, "one atomic write");
     assert_eq!(reqs[0].add_tuples.len(), 2);
+}
+
+#[tokio::test]
+async fn write_error_shows_server_status() {
+    let (mock, uri) = start_mock().await;
+    mock.lock().write_error = Some(Status::invalid_argument("obj 'a_b': invalid syntax"));
+    let mut c = client(uri).await;
+    let t = Tuple::new(
+        Namespace("doc".into()),
+        Obj("a_b".into()),
+        Rel::viewer(),
+        User::UserId(uid(1)),
+    );
+    let err = c.add_one(t).await.expect_err("server rejects the write");
+    assert_eq!(
+        err.to_string(),
+        "write tuples grpc call: InvalidArgument: obj 'a_b': invalid syntax"
+    );
+}
+
+#[tokio::test]
+async fn read_error_shows_server_status() {
+    let (mock, uri) = start_mock().await;
+    mock.lock().read_error = Some(Status::not_found("namespace 'nope' not found"));
+    let mut c = client(uri).await;
+    let err = c
+        .get_all(&Namespace("nope".into()), &Obj("1".into()))
+        .await
+        .expect_err("server rejects the read");
+    assert_eq!(
+        err.to_string(),
+        "read tuples grpc call: NotFound: namespace 'nope' not found"
+    );
 }
 
 // End-to-end coverage of the axum auth extractors against the in-process

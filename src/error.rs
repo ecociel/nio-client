@@ -47,7 +47,12 @@ pub struct WriteError(pub(super) Status);
 
 impl Display for WriteError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "write tuples grpc call")
+        write!(
+            f,
+            "write tuples grpc call: {:?}: {}",
+            self.0.code(),
+            self.0.message()
+        )
     }
 }
 
@@ -81,7 +86,12 @@ impl ReadError {
 impl Display for ReadError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            ReadError::Grpc(_) => write!(f, "read tuples grpc call"),
+            ReadError::Grpc(status) => write!(
+                f,
+                "read tuples grpc call: {:?}: {}",
+                status.code(),
+                status.message()
+            ),
             ReadError::InvalidResponse(msg) => write!(f, "invalid read response: {msg}"),
         }
     }
