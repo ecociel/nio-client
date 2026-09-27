@@ -23,3 +23,30 @@ Cargo.lock
 
 # MacOS
 .DS_Store
+
+# Orchestrate standing store (repo-local copy of the agent store)
+.claude/orchestrate/
+
+# Same idea, other harnesses / older names
+.claude/orchestrator/
+.cursor/orchestrate/
+.agents/orchestrate/
+
+# Eval transcripts
+**/evals/**/runs/
+**/eval-runs/
+**/review-inbox/
+
+# Agent worktrees (pstack-harness / local isolation)
+.worktrees/
+.claude/worktrees/
+
+# Session-local
+.remember/
+todo.md
+
+# Decision trail if dropped in the repo root instead of the store
+/decisions.tsv
+/frontier.json
+/units.tsv
+/ledger.tsv
