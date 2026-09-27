@@ -55,7 +55,7 @@ against a nio server that uses integer user IDs. In the crate:
 **`Principal` wraps a `UserId` (from 0.2 only).** `Principal::anonymous`,
 `Principal::is_anonymous`, `Principal::as_str`, `auth::ANONYMOUS` and the
 conversions to and from `String` are gone. Call `principal.user_id()`, or
-format it with `Display`. For a route without a session, use
+format it with `Display`. `Principal` is now `Copy`. For a route without a session, use
 `WithOptPrincipal`, whose `principal` is `None` for an anonymous caller.
 
 **`CheckResult::UnknownPutativeUser` is gone (from 0.2 only).** `check`
