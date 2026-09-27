@@ -64,8 +64,7 @@ A tuple subject is a `User`:
 - `User::AuthenticatedUsers` is every signed-in principal (`authenticatedUsers`)
 - `User::UserSet { ns, obj, rel }` is a userset (`group:eng#member`)
 
-nio `f7569b9` treats both wildcards as a grant to every user ID
-([nio#316](https://github.com/ecociel/nio/issues/316)).
+nio treats both wildcards as a grant to every user ID.
 
 `User` parses from and prints to the text form in parentheses. `check`,
 `list`, and `content_change_check` take a `UserId`, because nio evaluates
