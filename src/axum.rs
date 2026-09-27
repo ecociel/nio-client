@@ -90,10 +90,7 @@ async fn resolve_subject(resolver: &Arc<dyn SessionResolver>, token: &str) -> Su
     }
 }
 
-/// Percent-encodes everything but the unreserved set and `/`. The request URI
-/// is already in encoded form, so `%` is encoded too: one decode by the sign-in
-/// page gives the path and query back byte for byte, as a single `back` value.
-fn percent_encode(s: &str) -> String {
+fn encode_back(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
@@ -410,7 +407,7 @@ impl AuthState {
             None => &parts.uri,
         };
         let back = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
-        format!("{}/signin?back={}", self.prefix, percent_encode(back))
+        format!("{}/signin?back={}", self.prefix, encode_back(back))
     }
 }
 
@@ -583,9 +580,6 @@ mod tests {
 
     async fn guarded(_: WithPrincipal<TestResource>) {}
 
-    /// Serves a cookie-guarded route nested at `/app` and at the root, sends
-    /// `GET uri` without a session cookie, and returns the `Location` of the
-    /// 303.
     async fn signin_redirect_for(prefix: Option<&str>, uri: &str) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
