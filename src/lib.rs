@@ -866,7 +866,10 @@ impl CheckClient {
         .await
     }
 
-    /// Returns stored tuples matching `filters` at any current snapshot.
+    /// Returns stored tuples matching `filters`. Unlike `check`, a read
+    /// without a zookie skips the server's quantized default snapshot. nio
+    /// mints a fresh timestamp, so the result includes every write committed
+    /// before the call, at the cost of waiting behind in-flight writes.
     pub async fn read(&mut self, filters: Vec<ReadFilter>) -> Result<ReadResult, ReadError> {
         self.read_with_timestamp(Timestamp::empty(), filters).await
     }

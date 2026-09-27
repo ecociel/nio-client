@@ -60,9 +60,11 @@ leading zero. It rejects `0`, `-5`, `01`, and any value that does not fit in an
 A tuple subject is a `User`:
 
 - `User::UserId(id)` is one principal (`42`)
-- `User::AllUsers` is everyone, signed in or not (`allUsers`)
+- `User::AllUsers` is a wildcard, a grant to many users at once (`allUsers`)
 - `User::AuthenticatedUsers` is every signed-in principal (`authenticatedUsers`)
 - `User::UserSet { ns, obj, rel }` is a userset (`group:eng#member`)
+
+nio treats both wildcards as a grant to every user ID.
 
 `User` parses from and prints to the text form in parentheses. `check`,
 `list`, and `content_change_check` take a `UserId`, because nio evaluates
