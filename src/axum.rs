@@ -3,7 +3,8 @@ use crate::session::SessionResolver;
 use crate::UserId;
 use crate::{CheckClient, Namespace, Obj, Rel};
 use axum::extract::FromRef;
-use axum::http::Method;
+use axum::http::header::{CONTENT_TYPE, WWW_AUTHENTICATE};
+use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::{extract::FromRequestParts, http::request::Parts};
 use headers::authorization::Bearer;
@@ -17,9 +18,13 @@ use std::sync::Arc;
 #[derive(Debug, thiserror::Error)]
 #[error("Web resource error")]
 pub enum WebResourceError {
-    /// No usable session; the payload is the sign-in location to redirect to
-    /// (`{prefix}/signin?back={original-uri}`).
-    MissingSession(String),
+    /// No bearer token, a malformed `Authorization` header, or an unknown,
+    /// expired or revoked token. Answered with 401, `WWW-Authenticate: Bearer`
+    /// and an RFC 9457 problem body.
+    Unauthorized,
+    /// No session cookie, or an unknown, expired or revoked one. Answered with
+    /// 303 to the sign-in location (`{prefix}/signin?back={original-uri}`).
+    SigninRedirect(String),
     Forbidden,
     MethodNotAllowed,
     InternalServerError(Box<dyn Error + 'static>),
@@ -28,22 +33,32 @@ pub enum WebResourceError {
 
 impl IntoResponse for WebResourceError {
     fn into_response(self) -> Response {
-        // Each variant maps to a distinct status so ops/clients can
-        // distinguish auth failures, parse errors, and backend faults
-        // (NIO-015). MissingSession stays a browser redirect.
         match self {
-            WebResourceError::MissingSession(loc) => Redirect::to(loc.as_str()).into_response(),
-            WebResourceError::Forbidden => axum::http::StatusCode::FORBIDDEN.into_response(),
-            WebResourceError::MethodNotAllowed => {
-                axum::http::StatusCode::METHOD_NOT_ALLOWED.into_response()
-            }
+            WebResourceError::Unauthorized => unauthorized(),
+            WebResourceError::SigninRedirect(loc) => Redirect::to(loc.as_str()).into_response(),
+            WebResourceError::Forbidden => StatusCode::FORBIDDEN.into_response(),
+            WebResourceError::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED.into_response(),
             WebResourceError::InternalServerError(err) => {
                 log::error!("web resource internal error: {err}");
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
             }
-            WebResourceError::Parse(_) => axum::http::StatusCode::BAD_REQUEST.into_response(),
+            WebResourceError::Parse(_) => StatusCode::BAD_REQUEST.into_response(),
         }
     }
+}
+
+const UNAUTHORIZED_PROBLEM: &str = r#"{"type":"about:blank","status":401,"title":"Unauthorized","detail":"the request carried no bearer token, or the token is not valid"}"#;
+
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [
+            (WWW_AUTHENTICATE, "Bearer"),
+            (CONTENT_TYPE, "application/problem+json"),
+        ],
+        UNAUTHORIZED_PROBLEM,
+    )
+        .into_response()
 }
 
 pub struct SessionCookieAuth;
@@ -153,7 +168,7 @@ where
                 .and_then(|c| c.get("session").map(String::from))
             {
                 None => {
-                    return Err(WebResourceError::MissingSession(
+                    return Err(WebResourceError::SigninRedirect(
                         auth_state.signin_location(parts),
                     ))
                 }
@@ -169,7 +184,7 @@ where
             let u = match resolve_subject(&auth_state.resolver, &token).await {
                 Subject::Principal(u) => u,
                 Subject::NotFound => {
-                    return Err(WebResourceError::MissingSession(
+                    return Err(WebResourceError::SigninRedirect(
                         auth_state.signin_location(parts),
                     ))
                 }
@@ -211,14 +226,9 @@ where
                 .await
                 .map_err(|err| WebResourceError::Parse(Box::new(err)))?;
 
-            // TODO impl proper oauth2 response
             let bearer = match parts.headers.typed_try_get::<Authorization<Bearer>>() {
                 Ok(Some(bearer)) => bearer,
-                Ok(None) | Err(_) => {
-                    return Err(WebResourceError::MissingSession(
-                        auth_state.signin_location(parts),
-                    ))
-                }
+                Ok(None) | Err(_) => return Err(WebResourceError::Unauthorized),
             };
 
             let ns = resource.namespace();
@@ -229,11 +239,7 @@ where
 
             let u = match resolve_subject(&auth_state.resolver, bearer.token()).await {
                 Subject::Principal(u) => u,
-                Subject::NotFound => {
-                    return Err(WebResourceError::MissingSession(
-                        auth_state.signin_location(parts),
-                    ))
-                }
+                Subject::NotFound => return Err(WebResourceError::Unauthorized),
                 Subject::Error(err) => return Err(err),
             };
 
@@ -276,20 +282,14 @@ where
             let auth_state = AuthState::from_ref(state);
             let bearer = match parts.headers.typed_try_get::<Authorization<Bearer>>() {
                 Ok(Some(bearer)) => bearer,
-                Ok(None) | Err(_) => {
-                    return Err(WebResourceError::MissingSession(
-                        auth_state.signin_location(parts),
-                    ))
-                }
+                Ok(None) | Err(_) => return Err(WebResourceError::Unauthorized),
             };
             match resolve_subject(&auth_state.resolver, bearer.token()).await {
                 Subject::Principal(principal) => Ok(Authenticated {
                     principal,
                     auth_type: PhantomData,
                 }),
-                Subject::NotFound => Err(WebResourceError::MissingSession(
-                    auth_state.signin_location(parts),
-                )),
+                Subject::NotFound => Err(WebResourceError::Unauthorized),
                 Subject::Error(err) => Err(err),
             }
         }
@@ -446,8 +446,8 @@ mod tests {
     }
 
     #[test]
-    fn missing_session_redirects_to_location() {
-        let resp = WebResourceError::MissingSession("/app/signin?back=%2Fx".into()).into_response();
+    fn signin_redirect_redirects_to_location() {
+        let resp = WebResourceError::SigninRedirect("/app/signin?back=%2Fx".into()).into_response();
         assert_eq!(resp.status(), StatusCode::SEE_OTHER);
         let loc = resp
             .headers()
@@ -481,6 +481,76 @@ mod tests {
             Arc::new(NopResolver),
             prefix,
         )
+    }
+
+    struct TestResource;
+    impl WebResource for TestResource {
+        type Rejection = std::convert::Infallible;
+
+        fn namespace(&self) -> Namespace {
+            Namespace("article".into())
+        }
+
+        fn rel(&self, _method: &Method) -> Option<Rel> {
+            Some(Rel("article.get".into()))
+        }
+
+        async fn parse<S: Send + Sync>(
+            _parts: &mut Parts,
+            _state: &S,
+        ) -> Result<Self, Self::Rejection> {
+            Ok(TestResource)
+        }
+
+        fn object(&self) -> Obj {
+            Obj("1".into())
+        }
+    }
+
+    async fn bearer_rejection(authorization: Option<&str>) -> Response {
+        let mut builder = axum::http::Request::builder().uri("/api/articles/1");
+        if let Some(value) = authorization {
+            builder = builder.header(axum::http::header::AUTHORIZATION, value);
+        }
+        let (mut parts, _) = builder.body(()).unwrap().into_parts();
+        let state = state_with_prefix(None);
+        match WithPrincipal::<TestResource, BearerTokenAuth>::from_request_parts(&mut parts, &state)
+            .await
+        {
+            Ok(_) => panic!("bearer guard accepted the request"),
+            Err(err) => err.into_response(),
+        }
+    }
+
+    async fn assert_401_problem(resp: Response) {
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.headers().get(WWW_AUTHENTICATE).unwrap(), "Bearer");
+        assert_eq!(
+            resp.headers().get(CONTENT_TYPE).unwrap(),
+            "application/problem+json"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            body,
+            r#"{"type":"about:blank","status":401,"title":"Unauthorized","detail":"the request carried no bearer token, or the token is not valid"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn bearer_missing_is_401_problem() {
+        assert_401_problem(bearer_rejection(None).await).await;
+    }
+
+    #[tokio::test]
+    async fn bearer_unknown_is_401_problem() {
+        assert_401_problem(bearer_rejection(Some("Bearer unknown-token")).await).await;
+    }
+
+    #[tokio::test]
+    async fn bearer_malformed_is_401_problem() {
+        assert_401_problem(bearer_rejection(Some("Basic dXNlcjpwYXNz")).await).await;
     }
 
     #[tokio::test]

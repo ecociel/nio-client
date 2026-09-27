@@ -96,7 +96,14 @@ let resolver = GrpcSessionResolver::new(session_channel, ResolverConfig::default
 
 With the `axum` feature, `axum::AuthState::new(check_client, resolver, prefix)`
 wires both into the `WithPrincipal` / `WithOptPrincipal` / `Authenticated`
-extractors. Sign-in redirects go to `{prefix}/signin?back={original-uri}`.
+extractors. The cookie guards redirect a caller without a valid session to
+`{prefix}/signin?back={original-uri}` with 303. The bearer guards answer a
+missing, malformed or unknown token with 401, `WWW-Authenticate: Bearer` and
+an `application/problem+json` body:
+
+```json
+{"type":"about:blank","status":401,"title":"Unauthorized","detail":"the request carried no bearer token, or the token is not valid"}
+```
 
 All channels enable HTTP/2 keepalive (30s / 10s / while idle — nio #239).
 `CheckClient::create_with_tls` / `connect_channel(uri, Some(tls))` take a
@@ -108,7 +115,7 @@ Opaque session tokens are resolved via `am.SessionService` on nio-client
 (issue #243/#245). The axum extractors hash the cookie or bearer token
 (`sha256`, hex — the raw token never leaves the process), resolve it, and
 send the principal's `UserId` to `check`. Unknown / expired / revoked tokens
-redirect to signin with zero check RPCs.
+make zero check RPCs: a cookie redirects to signin, a bearer token gets 401.
 
 The resolver caches positives (LRU, TTL with downward-only jitter), tombstones
 unknown tokens, coalesces concurrent misses, refreshes hot entries ahead of

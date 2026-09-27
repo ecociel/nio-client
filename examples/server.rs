@@ -5,7 +5,7 @@ use axum::http::Method;
 use axum::routing::get;
 use axum::Router;
 use http::Uri;
-use nio_client::axum::{AuthState, WebResource, WithPrincipal};
+use nio_client::axum::{AuthState, BearerTokenAuth, WebResource, WithPrincipal};
 use nio_client::session::{GrpcSessionResolver, ResolverConfig};
 use nio_client::{connect_channel, CheckClient, Namespace, Obj, Rel};
 use std::env;
@@ -47,6 +47,13 @@ async fn get_article(auth: WithPrincipal<ArticleResource>) -> String {
     )
 }
 
+async fn api_get_article(auth: WithPrincipal<ArticleResource, BearerTokenAuth>) -> String {
+    format!(
+        "Article id={} (principal {})",
+        auth.resource.id, auth.principal
+    )
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // check and nio-client (session) are always separate endpoints. The
@@ -66,6 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .route("/articles/{id}", get(get_article))
+        .route("/api/articles/{id}", get(api_get_article))
         .with_state(state);
 
     println!("Starting server on port 8080...");
