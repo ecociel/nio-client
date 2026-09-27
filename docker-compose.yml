@@ -1,0 +1,104 @@
+services:
+  check:
+    image: nio-check:sqlite
+    environment:
+      - RUST_LOG=debug
+      - GRPC_LISTEN_ADDRESS=0.0.0.0:50052
+      - GRPC_REQUIRE_CLIENT_AUTH=false
+      - DB_CONNECTION=sqlite:/var/db/check.sqlite
+      - NAMESPACES_PATH=/etc/check/namespaces/bootstrap.yaml
+    ports:
+      - "${NIO_CHECK_PORT:-50051}:50052"
+    configs:
+      - source: namespaces
+        target: /etc/check/namespaces/bootstrap.yaml
+    volumes:
+      - ${NIO_DATA_DIR:-./.nio-data}:/var/db
+
+  client:
+    image: nio-client:sqlite
+    environment:
+      - RUST_LOG=debug
+      - HTTP_LISTEN_ADDRESS=0.0.0.0:8080
+      - SESSION_GRPC_LISTEN_ADDRESS=0.0.0.0:50053
+      - SESSION_GRPC_REQUIRE_CLIENT_AUTH=false
+      - DB_CONNECTION=sqlite:/var/db/client.sqlite
+      - NIO_CHECK_URI=http://check:50052
+      - BASE_URI=http://localhost:${NIO_HTTP_PORT:-8090}/auth
+      - AUDIENCE=nio-client
+      - TENANTS_PATH=/etc/client/tenants.yaml
+      - TENANT_ENCRYPTION_KEY=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+    ports:
+      - "${NIO_HTTP_PORT:-8090}:8080"
+      - "${NIO_SESSION_PORT:-50052}:50053"
+    configs:
+      - source: tenants
+        target: /etc/client/tenants.yaml
+    volumes:
+      - ${NIO_DATA_DIR:-./.nio-data}:/var/db
+    depends_on:
+      check:
+        condition: service_started
+
+configs:
+  namespaces:
+    content: |
+      name: customer
+      relations:
+        - name: owner
+          rewrite: { type: this }
+        - name: viewer
+          rewrite: { type: this }
+        - name: customer.get
+          rewrite:
+            type: union
+            children:
+              - { type: computed_userset, relation: owner }
+              - { type: computed_userset, relation: viewer }
+        - name: customer.update
+          rewrite: { type: computed_userset, relation: owner }
+      ---
+      name: project
+      relations:
+        - name: owner
+          rewrite: { type: this }
+        - name: editor
+          rewrite: { type: this }
+        - name: viewer
+          rewrite: { type: this }
+        - name: project.get
+          rewrite:
+            type: union
+            children:
+              - { type: computed_userset, relation: owner }
+              - { type: computed_userset, relation: editor }
+              - { type: computed_userset, relation: viewer }
+        - name: project.update
+          rewrite:
+            type: union
+            children:
+              - { type: computed_userset, relation: owner }
+              - { type: computed_userset, relation: editor }
+        - name: project.delete
+          rewrite: { type: computed_userset, relation: owner }
+      ---
+      name: article
+      relations:
+        - name: editor
+          rewrite: { type: this }
+        - name: viewer
+          rewrite: { type: this }
+        - name: article.get
+          rewrite:
+            type: union
+            children:
+              - { type: computed_userset, relation: editor }
+              - { type: computed_userset, relation: viewer }
+        - name: article.update
+          rewrite: { type: computed_userset, relation: editor }
+
+  tenants:
+    content: |
+      id: default
+      label: nio-client live tests
+      local: {}

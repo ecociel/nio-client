@@ -176,9 +176,68 @@ A [Taskfile](https://taskfile.dev) drives the workflow:
     task build       # cargo build --features axum
     task lint        # clippy, warnings are errors
     task test        # unit + in-process mock gRPC server tests
-    task test-live   # live tests against NIO_CHECK_URI
+    task test-live   # live tests against the stack from task stack-up
     task ci          # fmt-check + lint + build + test
     task example-check -- customer acme customer.update 42
+
+Without a zookie, `check` evaluates at nio's default snapshot, which can
+trail a write by a moment. To check your own write, pass the `ts=` value
+that `task example-write` prints as the fifth argument of
+`task example-check`.
+
+## Run the live tests against a local nio stack
+
+`docker-compose.yml` runs nio `check` and `nio-client` on SQLite. It needs
+the images `nio-check:sqlite` and `nio-client:sqlite`. To build them, run
+`task build:check:sqlite build:client:sqlite` in a checkout of
+[ecociel/nio](https://github.com/ecociel/nio). You also need `grpcurl`.
+
+1. Start the stack:
+
+       task stack-up
+
+   The task waits up to 120 seconds until `am.CheckService` and
+   `am.SessionService` answer a request, then prints the ports.
+
+2. Run the live tests:
+
+       task test-live
+
+   Each run writes tuples on fresh object IDs and signs up a fresh user, so
+   you can run the tests again against the same stack.
+
+3. Stop the stack and delete its databases:
+
+       task stack-down
+
+The stack listens on these host ports. Set the variable to change a port.
+
+| Variable | Default | Service |
+| --- | --- | --- |
+| `NIO_CHECK_PORT` | 50051 | `am.CheckService` on `check` |
+| `NIO_SESSION_PORT` | 50052 | `am.SessionService` on `nio-client` |
+| `NIO_HTTP_PORT` | 8090 | `nio-client` sign-in pages under `/auth` |
+
+The databases live in `NIO_DATA_DIR`, which defaults to `./.nio-data`.
+`task test-live` derives `NIO_CHECK_URI`, `NIO_SESSION_URI` and
+`NIO_BASE_URI` from the ports. Set a URI to test against another server.
+
+To run two stacks side by side, give each its own project name, ports and
+data directory:
+
+    export COMPOSE_PROJECT_NAME=nio-b NIO_CHECK_PORT=50151 \
+      NIO_SESSION_PORT=50152 NIO_HTTP_PORT=8190 NIO_DATA_DIR=./.nio-data-b
+    task stack-up test-live stack-down
+
+To measure check latency, run 1000 sequential checks:
+
+    NIO_CHECK_URI=http://localhost:50051 cargo test --release --features live-tests \
+      --test live check_latency_probe -- --ignored --nocapture
+
+The probe prints `p50_us=<n> p99_us=<n>`.
+
+The stack is for local development only. It turns off client certificates on
+both gRPC services and uses a fixed, public `TENANT_ENCRYPTION_KEY`.
 
 # License
 

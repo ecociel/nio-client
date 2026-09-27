@@ -50,3 +50,5 @@ todo.md
 /frontier.json
 /units.tsv
 /ledger.tsv
+
+/.nio-data*/
