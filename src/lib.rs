@@ -866,7 +866,7 @@ impl CheckClient {
         .await
     }
 
-    /// Returns stored tuples matching `filters` at any current snapshot.
+    /// Returns stored tuples matching `filters` at the latest snapshot.
     pub async fn read(&mut self, filters: Vec<ReadFilter>) -> Result<ReadResult, ReadError> {
         self.read_with_timestamp(Timestamp::empty(), filters).await
     }
