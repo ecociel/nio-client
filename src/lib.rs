@@ -1,7 +1,6 @@
 use std::fmt::{Display, Formatter};
 use std::num::NonZeroI64;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use crate::auth::{CallError, CheckResult, Principal};
@@ -17,6 +16,7 @@ pub mod auth;
 pub mod axum;
 mod error;
 pub mod memo;
+pub mod metrics;
 pub mod session;
 
 /// Ns is a collection of objects.
@@ -512,10 +512,6 @@ impl ReadFilter {
     }
 }
 
-pub type ObserveCheckFn =
-    Arc<dyn Fn(&Namespace, &Obj, &Rel, &UserId, Duration, bool, bool) + Send + Sync>;
-pub type ObserveListFn = Arc<dyn Fn(&Namespace, &Rel, &UserId, Duration, bool) + Send + Sync>;
-
 // HTTP/2 keepalive contract shared with nio check_client (#239): pings must
 // flow while idle so connections survive L4 idle-eviction.
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
@@ -547,8 +543,6 @@ pub async fn connect_channel(
 pub struct CheckClient {
     check: pb::check_service_client::CheckServiceClient<Channel>,
     ns: pb::namespace_service_client::NamespaceServiceClient<Channel>,
-    observe_check: Option<ObserveCheckFn>,
-    observe_list: Option<ObserveListFn>,
 }
 
 impl std::fmt::Debug for CheckClient {
@@ -574,23 +568,7 @@ impl CheckClient {
         CheckClient {
             check: pb::check_service_client::CheckServiceClient::new(channel.clone()),
             ns: pb::namespace_service_client::NamespaceServiceClient::new(channel),
-            observe_check: None,
-            observe_list: None,
         }
-    }
-
-    /// Sets an observe function called after every check RPC with
-    /// (ns, obj, rel, user_id, duration, ok, is_error).
-    pub fn with_observe_check(mut self, f: ObserveCheckFn) -> Self {
-        self.observe_check = Some(f);
-        self
-    }
-
-    /// Sets an observe function called after every list RPC with
-    /// (ns, rel, user_id, duration, is_error).
-    pub fn with_observe_list(mut self, f: ObserveListFn) -> Self {
-        self.observe_list = Some(f);
-        self
     }
 
     /// Calls the check server's Check API: may `user_id` — a principal;
@@ -613,26 +591,15 @@ impl CheckClient {
             return Ok(CheckResult::Forbidden(user_id.into()));
         }
         let r = pb::CheckRequest {
-            ns: ns.0.clone(),
-            obj: obj.0.clone(),
-            rel: rel.0.clone(),
+            ns: ns.0,
+            obj: obj.0,
+            rel: rel.0,
             user: Some(pb::check_request::User::UserId(user_id.get())),
             ts: timestamp.map(|t| t.0),
         };
         let started = std::time::Instant::now();
         let result = self.check.check(r).await;
-        if let Some(observe) = &self.observe_check {
-            let ok = result.as_ref().map(|r| r.get_ref().ok).unwrap_or(false);
-            observe(
-                &ns,
-                &obj,
-                &rel,
-                &user_id,
-                started.elapsed(),
-                ok,
-                result.is_err(),
-            );
-        }
+        metrics::check_rpc("check", &result, started.elapsed());
         let response = result?.into_inner();
         let Some(principal) = response
             .principal
@@ -660,16 +627,14 @@ impl CheckClient {
         timestamp: Option<Timestamp>,
     ) -> Result<ListResult, CallError> {
         let r = pb::ListRequest {
-            ns: ns.0.clone(),
-            rel: rel.0.clone(),
+            ns: ns.0,
+            rel: rel.0,
             user: Some(pb::list_request::User::UserId(user_id.get())),
             ts: timestamp.map(|t| t.0),
         };
         let started = std::time::Instant::now();
         let result = self.check.list(r).await;
-        if let Some(observe) = &self.observe_list {
-            observe(&ns, &rel, &user_id, started.elapsed(), result.is_err());
-        }
+        metrics::check_rpc("list", &result, started.elapsed());
         match result.map(|r| r.into_inner()) {
             Ok(response) => Ok(ListResult {
                 ts: Timestamp(response.ts),
@@ -697,7 +662,10 @@ impl CheckClient {
             rel: rel.0,
             ts: timestamp.map(|t| t.0),
         };
-        let response = self.check.expand(r).await?.into_inner();
+        let started = std::time::Instant::now();
+        let result = self.check.expand(r).await;
+        metrics::check_rpc("expand", &result, started.elapsed());
+        let response = result?.into_inner();
         let user_ids = response
             .user_ids
             .into_iter()
@@ -747,12 +715,10 @@ impl CheckClient {
                 user_id.get(),
             )),
         };
-        match self
-            .check
-            .content_change_check(r)
-            .await
-            .map(|r| r.into_inner())
-        {
+        let started = std::time::Instant::now();
+        let result = self.check.content_change_check(r).await;
+        metrics::check_rpc("content_change_check", &result, started.elapsed());
+        match result.map(|r| r.into_inner()) {
             Ok(response) => Ok(ContentChangeCheckResult {
                 ok: response.ok,
                 ts: Timestamp(response.ts),
@@ -783,7 +749,10 @@ impl CheckClient {
             ns: ns.0,
             start_ts: start_ts.0,
         };
-        match self.check.watch(r).await {
+        let started = std::time::Instant::now();
+        let result = self.check.watch(r).await;
+        metrics::check_rpc("watch", &result, started.elapsed());
+        match result {
             Ok(response) => Ok(WatchStream {
                 inner: response.into_inner(),
             }),
@@ -795,7 +764,10 @@ impl CheckClient {
     /// the declared relations and the rewrite kind of each. Schema metadata
     /// only — no tuples.
     pub async fn list_namespaces(&mut self) -> Result<Vec<NamespaceMeta>, ReadError> {
-        match self.ns.list_namespaces(()).await.map(|r| r.into_inner()) {
+        let started = std::time::Instant::now();
+        let result = self.ns.list_namespaces(()).await;
+        metrics::check_rpc("list_namespaces", &result, started.elapsed());
+        match result.map(|r| r.into_inner()) {
             Ok(resp) => Ok(resp
                 .namespaces
                 .into_iter()
@@ -889,7 +861,10 @@ impl CheckClient {
             ts: (ts != Timestamp::empty()).then_some(ts.0),
             tuple_sets: filters.into_iter().map(|f| f.set).collect(),
         };
-        let response = self.check.read(request).await?.into_inner();
+        let started = std::time::Instant::now();
+        let result = self.check.read(request).await;
+        metrics::check_rpc("read", &result, started.elapsed());
+        let response = result?.into_inner();
         let mut tuples = Vec::with_capacity(response.tuples.len());
         for tup in response.tuples {
             tuples.push(tuple_from_pb(tup)?);
@@ -926,9 +901,10 @@ impl CheckClient {
             add_tuples: add.into_iter().map(tuple_to_pb).collect(),
             del_tuples: del.into_iter().map(tuple_to_pb).collect(),
         };
-        self.check
-            .write(request)
-            .await
+        let started = std::time::Instant::now();
+        let result = self.check.write(request).await;
+        metrics::check_rpc("write", &result, started.elapsed());
+        result
             .map(|r| Timestamp(r.into_inner().ts))
             .map_err(Into::into)
     }
