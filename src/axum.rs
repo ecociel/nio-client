@@ -2,7 +2,7 @@ use crate::auth::{CheckResult, Principal};
 use crate::session::SessionResolver;
 use crate::UserId;
 use crate::{CheckClient, Namespace, Obj, Rel};
-use axum::extract::FromRef;
+use axum::extract::{FromRef, OriginalUri};
 use axum::http::header::{CONTENT_TYPE, WWW_AUTHENTICATE};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -90,13 +90,14 @@ async fn resolve_subject(resolver: &Arc<dyn SessionResolver>, token: &str) -> Su
     }
 }
 
-/// Percent-encodes a query component (RFC 3986 unreserved characters pass
-/// through).
-fn urlencode(s: &str) -> String {
+/// Percent-encodes everything but the unreserved set and `/`. The request URI
+/// is already in encoded form, so `%` is encoded too: one decode by the sign-in
+/// page gives the path and query back byte for byte, as a single `back` value.
+fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
                 out.push(b as char)
             }
             _ => out.push_str(&format!("%{b:02X}")),
@@ -372,37 +373,44 @@ pub struct AuthState {
 }
 
 impl AuthState {
-    /// Creates a new AuthState for use with the Axum framework. With a
-    /// `prefix` of [`None`] sign-in redirects go to `/signin`, else to
-    /// `<prefix>/signin` (a lone "/" is treated as empty). The original
-    /// request URI is appended as `?back=`.
+    /// Creates a new AuthState for use with the Axum framework. Sign-in
+    /// redirects go to `<prefix>/signin`. The prefix is normalized to a
+    /// leading and no trailing slash, so `None`, `""` and `"/"` all mean the
+    /// root, and `"auth"`, `"/auth"` and `"/auth/"` all mean `/auth`. The path
+    /// and query the browser asked for are appended as `?back=`.
     pub fn new(
         check_client: CheckClient,
         resolver: Arc<dyn SessionResolver>,
         prefix: Option<&str>,
     ) -> Self {
-        let prefix = match prefix {
-            None | Some("/") => "",
-            Some(p) => p,
+        let trimmed = prefix.unwrap_or_default().trim_matches('/');
+        let prefix = if trimmed.is_empty() {
+            String::new()
+        } else {
+            format!("/{trimmed}")
         };
         AuthState {
             check_client,
             resolver,
-            prefix: prefix.to_string(),
+            prefix,
         }
     }
 
+    /// The normalized prefix, with a leading and no trailing slash. Empty at
+    /// the root.
     pub fn prefix(&self) -> &str {
         &self.prefix
     }
 
+    /// A nested router strips its own prefix from `parts.uri`, so the original
+    /// request URI is the one to come back to.
     fn signin_location(&self, parts: &Parts) -> String {
-        let back = parts
-            .uri
-            .path_and_query()
-            .map(|pq| pq.as_str())
-            .unwrap_or("/");
-        format!("{}/signin?back={}", self.prefix, urlencode(back))
+        let uri = match parts.extensions.get::<OriginalUri>() {
+            Some(original) => &original.0,
+            None => &parts.uri,
+        };
+        let back = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+        format!("{}/signin?back={}", self.prefix, percent_encode(back))
     }
 }
 
@@ -559,7 +567,7 @@ mod tests {
         let parts = parts_for("/articles/7?q=1");
         assert_eq!(
             state.signin_location(&parts),
-            "/signin?back=%2Farticles%2F7%3Fq%3D1"
+            "/signin?back=/articles/7%3Fq%3D1"
         );
     }
 
@@ -569,19 +577,94 @@ mod tests {
         let parts = parts_for("/articles/7");
         assert_eq!(
             state.signin_location(&parts),
-            "/app/signin?back=%2Farticles%2F7"
+            "/app/signin?back=/articles/7"
+        );
+    }
+
+    async fn guarded(_: WithPrincipal<TestResource>) {}
+
+    /// Serves a cookie-guarded route nested at `/app` and at the root, sends
+    /// `GET uri` without a session cookie, and returns the `Location` of the
+    /// 303.
+    async fn signin_redirect_for(prefix: Option<&str>, uri: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let app = axum::Router::new()
+            .nest(
+                "/app",
+                axum::Router::new()
+                    .route("/items", axum::routing::get(guarded))
+                    .route("/items/{id}", axum::routing::get(guarded)),
+            )
+            .route("/", axum::routing::get(guarded))
+            .with_state(state_with_prefix(prefix));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let request = format!("GET {uri} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+
+        assert!(
+            response.starts_with("HTTP/1.1 303 See Other\r\n"),
+            "{response}"
+        );
+        response
+            .lines()
+            .find_map(|line| line.strip_prefix("location: "))
+            .unwrap_or_else(|| panic!("no location header: {response}"))
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn back_keeps_nested_prefix() {
+        assert_eq!(
+            signin_redirect_for(Some("/auth"), "/app/items?page=2").await,
+            "/auth/signin?back=/app/items%3Fpage%3D2"
         );
     }
 
     #[tokio::test]
-    async fn lone_slash_prefix_is_empty() {
-        let state = state_with_prefix(Some("/"));
-        assert_eq!(state.prefix(), "");
+    async fn back_keeps_query() {
+        assert_eq!(
+            signin_redirect_for(None, "/app/items?page=2&sort=a+b&q=x%3Dy").await,
+            "/signin?back=/app/items%3Fpage%3D2%26sort%3Da%2Bb%26q%3Dx%253Dy"
+        );
     }
 
-    #[test]
-    fn urlencode_escapes_reserved() {
-        assert_eq!(urlencode("/a b?c=d&e"), "%2Fa%20b%3Fc%3Dd%26e");
-        assert_eq!(urlencode("AZaz09-._~"), "AZaz09-._~");
+    #[tokio::test]
+    async fn back_encodes_percent() {
+        assert_eq!(
+            signin_redirect_for(None, "/app/items/a%2Fb%20c").await,
+            "/signin?back=/app/items/a%252Fb%2520c"
+        );
+    }
+
+    #[tokio::test]
+    async fn back_of_root_is_slash() {
+        assert_eq!(signin_redirect_for(None, "/").await, "/signin?back=/");
+    }
+
+    #[tokio::test]
+    async fn prefix_spellings_normalize() {
+        let cases = [
+            (None, "/signin?back=/app/items"),
+            (Some(""), "/signin?back=/app/items"),
+            (Some("/"), "/signin?back=/app/items"),
+            (Some("auth"), "/auth/signin?back=/app/items"),
+            (Some("/auth"), "/auth/signin?back=/app/items"),
+            (Some("auth/"), "/auth/signin?back=/app/items"),
+            (Some("/auth/"), "/auth/signin?back=/app/items"),
+        ];
+        for (prefix, expected) in cases {
+            assert_eq!(
+                signin_redirect_for(prefix, "/app/items").await,
+                expected,
+                "prefix {prefix:?}"
+            );
+        }
     }
 }

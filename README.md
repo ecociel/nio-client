@@ -97,9 +97,18 @@ let resolver = GrpcSessionResolver::new(session_channel, ResolverConfig::default
 With the `axum` feature, `axum::AuthState::new(check_client, resolver, prefix)`
 wires both into the `WithPrincipal` / `WithOptPrincipal` / `Authenticated`
 extractors. The cookie guards redirect a caller without a valid session to
-`{prefix}/signin?back={original-uri}` with 303. The bearer guards answer a
-missing, malformed or unknown token with 401, `WWW-Authenticate: Bearer` and
-an `application/problem+json` body:
+`{prefix}/signin?back={original-uri}` with 303.
+
+- `prefix` is normalized. `None`, `""` and `"/"` send the caller to `/signin`.
+  `"auth"`, `"/auth"` and `"/auth/"` send the caller to `/auth/signin`.
+- `back` is the path and query the browser asked for, taken from axum's
+  `OriginalUri`, so a router mounted with `Router::nest` keeps its prefix.
+- `back` is percent-encoded except for `/`, so the query and any `%` in the
+  path survive as one parameter. With prefix `"auth"`, a request to
+  `/app/items?page=2` redirects to `/auth/signin?back=/app/items%3Fpage%3D2`.
+
+The bearer guards answer a missing, malformed or unknown token with 401,
+`WWW-Authenticate: Bearer` and an `application/problem+json` body:
 
 ```json
 {"type":"about:blank","status":401,"title":"Unauthorized","detail":"the request carried no bearer token, or the token is not valid"}
