@@ -20,6 +20,78 @@ stand-in and logs every RPC, so no server is required:
 Its [README](examples/webapp/README.md) is a guided walkthrough of the nio
 model and the axum extractors.
 
+# Upgrading from 0.3
+
+Version 0.4.0 changes the public API and the HTTP answers of the axum
+guards. Each item below says what changed and what you edit.
+
+**`WriteError` is an exported enum.** In 0.3 it was a struct in a private
+module, so you could only display it. Now `nio_client::WriteError` has three
+variants, and each carries the server's `tonic::Status`:
+
+- `ZookieConflict(Status)`. The server answered `FAILED_PRECONDITION`
+  because a tuple changed after the precondition zookie. Read again, then
+  retry with the new zookie.
+- `FutureZookie(Status)`. The server answered `INVALID_ARGUMENT` because the
+  precondition zookie is not older than the commit. Pass a zookie that the
+  server returned.
+- `Grpc(Status)`. Any other status.
+
+Code that only displays the error needs no edit. To react to a conflict,
+match on the variant:
+
+```rust,ignore
+match client.write(add, del, Some(zookie)).await {
+    Ok(ts) => { /* committed at ts */ }
+    Err(WriteError::ZookieConflict(_)) => { /* read again, then retry */ }
+    Err(err) => return Err(err.into()),
+}
+```
+
+**`WebResourceError::MissingSession` is gone.** Two variants replace it:
+
+- `SigninRedirect(String)` is the cookie guard's rejection. It still answers
+  303 to `{prefix}/signin?back=...`.
+- `Unauthorized` is the bearer guard's rejection. `WithPrincipal<R,
+  BearerTokenAuth>` and `Authenticated<BearerTokenAuth>` now answer a
+  missing, malformed or unknown token with 401, `WWW-Authenticate: Bearer`
+  and an `application/problem+json` body. In 0.3 they redirected to sign-in.
+
+Rename `MissingSession(loc)` to `SigninRedirect(loc)` in any `match`, and
+add an arm for `Unauthorized`. If an API client followed the bearer
+redirect, make it handle 401 instead.
+
+**The `back=` parameter of the sign-in redirect changed.** It now holds the
+path and query that the browser requested, so it keeps the prefix of a
+nested router. In 0.3 a guard inside `Router::nest("/app", ...)` dropped
+`/app` from `back`. The encoding also leaves `/`
+as is. `/articles/7?q=1` becomes `back=/articles/7%3Fq%3D1`, where 0.3 sent
+`back=%2Farticles%2F7%3Fq%3D1`. If your sign-in page decodes `back` with a
+URL decoder, it needs no edit. If it compares the raw string, update the
+comparison.
+
+**`AuthState::new` normalizes the prefix.** The prefix gets one leading
+slash and no trailing slash. `None`, `""` and `"/"` all mean the root.
+`"auth"`, `"/auth"` and `"/auth/"` all mean `/auth`. In 0.3, `"auth"`
+produced `auth/signin` and `"/auth/"` produced `/auth//signin`.
+`AuthState::prefix()` returns the normalized value. If you pass a prefix
+without a leading slash or with a trailing slash, check that your sign-in
+route is at `<prefix>/signin`.
+
+**`watch` and `write` refuse two requests without a call.**
+`CheckClient::watch` with an empty start timestamp returns
+`CallError::Status` with `INVALID_ARGUMENT`. To start at the oldest
+retained change, pass `Timestamp::empty()`. `CheckClient::write` with a
+tuple in `del` that carries `Condition::Expires` returns
+`WriteError::Grpc` with `INVALID_ARGUMENT`. Remove the condition from
+tuples you delete.
+
+**The observe closures are removed.** `CheckClient::with_observe_check`,
+`CheckClient::with_observe_list`, `ObserveCheckFn` and `ObserveListFn` are
+gone. Enable the `metrics` feature and register the families as
+[Metrics](#metrics) shows. The series cover every `CheckClient` RPC and the
+session resolver.
+
 # Updating gRPC Code
 
 The generated code is built by `build.rs` (tonic-build) from the proto files
