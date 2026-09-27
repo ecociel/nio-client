@@ -1344,10 +1344,10 @@ mod axum_extractors {
             Err(err) => err,
         };
         match err {
-            WebResourceError::MissingSession(loc) => {
+            WebResourceError::SigninRedirect(loc) => {
                 assert!(loc.starts_with("/app/signin?back="), "loc={loc}");
             }
-            other => panic!("expected MissingSession, got {other:?}"),
+            other => panic!("expected SigninRedirect, got {other:?}"),
         }
         assert!(mock.lock().check_requests.is_empty(), "zero check RPCs");
     }

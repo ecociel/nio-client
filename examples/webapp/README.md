@@ -83,9 +83,10 @@ For a guarded route like `GET /articles/1`, the `WithPrincipal` extractor runs
 1. **parse** the resource from the request → namespace `article`, object `1`,
    relation from the method (`GET` → `article.get`).
 2. read the token (cookie for `SessionCookieAuth`, bearer for
-   `BearerTokenAuth`). No token → redirect to `/signin?back=…`.
+   `BearerTokenAuth`). No cookie → redirect to `/signin?back=…`. No bearer
+   token → `401`.
 3. **resolve** `sha256(token)` → principal. Not found → redirect to sign-in
-   (no check made).
+   for a cookie, `401` for a bearer token (no check made).
 4. **check** `article:1#article.get @ principal`. Allowed → your handler runs
    with `auth.principal` and `auth.resource`. Denied → `403`.
 
@@ -98,7 +99,7 @@ Your handler body only runs when all four steps succeed.
 | Extractor | Token source | No/invalid token | Use for |
 |-----------|--------------|------------------|---------|
 | `WithPrincipal<R>` (default `SessionCookieAuth`) | `session` cookie | redirect to sign-in | browser UI pages |
-| `WithPrincipal<R, BearerTokenAuth>` | `Authorization: Bearer` | redirect to sign-in¹ | APIs |
+| `WithPrincipal<R, BearerTokenAuth>` | `Authorization: Bearer` | `401` problem¹ | APIs |
 | `WithOptPrincipal<R>` | `session` cookie | **allowed as anonymous** | public pages that still authorize a signed-in user |
 
 There is also `Authenticated<BearerTokenAuth>`, which resolves the caller
@@ -106,10 +107,11 @@ There is also `Authenticated<BearerTokenAuth>`, which resolves the caller
 request **body** (parse can't see the body). Such a handler must call
 `CheckClient::check` itself once it knows the object.
 
-¹ The current bearer path redirects (303) on a missing/invalid token, same as
-the cookie path — there is a `TODO` in the library to return a proper OAuth2
-`401`/`WWW-Authenticate` instead. For a real API you would map
-`WebResourceError::MissingSession` to `401`.
+¹ A missing, malformed or unknown bearer token gets `401` with
+`WWW-Authenticate: Bearer` and an `application/problem+json` body
+(`WebResourceError::Unauthorized`). `Authenticated<BearerTokenAuth>` answers
+the same way. The cookie guard's rejection is
+`WebResourceError::SigninRedirect`.
 
 ---
 
@@ -141,7 +143,7 @@ curl -si http://127.0.0.1:8080/articles/1 | grep -i location
 #   location: /signin?back=%2Farticles%2F1
 ```
 
-No cookie → the extractor rejects with `MissingSession`, redirecting to
+No cookie → the extractor rejects with `SigninRedirect`, redirecting to
 sign-in with the original path preserved in `back`. In a browser you land on
 the sign-in form; after signing in, the success page links you back.
 
@@ -181,6 +183,7 @@ on one session triggers **one** resolve but a check **per request**.
 TOKEN=<the 64-hex token from step B>
 curl -H "Authorization: Bearer $TOKEN"        http://127.0.0.1:8080/api/articles/1   # 200, "principal":"1001"
 curl -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:8080/api/articles/2   # 403
+curl -i http://127.0.0.1:8080/api/articles/1                                          # 401, no token
 ```
 
 `GET` maps to `article.get`, `POST` to `article.update`. alice may read
@@ -249,7 +252,6 @@ Two things this demo simplifies:
 
 - Add `Secure` (and consider `__Host-`/`SameSite=Strict`) to the session
   cookie — this demo runs plain HTTP on loopback.
-- Map the bearer `MissingSession` rejection to `401` for APIs (see note ¹).
 - Serve check and session over TLS; never use an insecure channel off-box.
 
 ---
