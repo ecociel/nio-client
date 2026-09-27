@@ -42,8 +42,7 @@ impl std::error::Error for ConnectError {
     }
 }
 
-/// Errors from Write. The precondition zookie has two rejections of its own so
-/// callers can match on them; every variant keeps the server status.
+/// Errors from the write calls. Every variant carries the server status.
 #[derive(Debug)]
 pub enum WriteError {
     /// `FAILED_PRECONDITION`: a tuple this write touches changed after the
@@ -84,8 +83,6 @@ impl std::error::Error for WriteError {
     }
 }
 
-/// From nio check's `FutureWriteZookie` message. The code alone cannot tell a
-/// future zookie from any other invalid argument.
 const FUTURE_ZOOKIE_MARKER: &str = "is not strictly before the store fence";
 
 impl From<Status> for WriteError {
