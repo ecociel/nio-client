@@ -20,12 +20,50 @@ stand-in and logs every RPC, so no server is required:
 Its [README](examples/webapp/README.md) is a guided walkthrough of the nio
 model and the axum extractors.
 
-# Upgrading from 0.3
+# Upgrading to 0.4
 
 Version 0.4.0 changes the public API and the HTTP answers of the axum
-guards. Each item below says what changed and what you edit.
+guards. The last release on crates.io is 0.2.1, so the list covers the
+changes since 0.2.1. Items marked **(from 0.2 only)** changed in 0.3.0 and
+do not affect 0.3 users. Each item says what changed and what you edit.
 
-**`WriteError` is an exported enum.** In 0.3 it was a struct in a private
+**Rust 1.85 or later.** `rust-version` is now 1.85. Current releases of
+some dependencies use edition 2024, which older toolchains cannot build.
+
+**User IDs are integers (from 0.2 only).** nio identifies a principal by a
+positive 64-bit integer (nio #301), and the protos carry `int64`. Deploy
+against a nio server that uses integer user IDs. In the crate:
+
+- `UserId` wraps a private `NonZeroI64` instead of a public `String`.
+  Replace `UserId(s)` with `s.parse()?` or `UserId::try_from(n)?`, and
+  `id.0` with `id.get()` or `id.to_string()`. `UserId` is now `Copy`.
+- `UserId::ALL_USERS`, `UserId::AUTHENTICATED_USERS`, `UserId::all_users()`
+  and `UserId::authenticated_users()` are gone. Use `User::AllUsers` and
+  `User::AuthenticatedUsers` in tuples. The text constants moved to
+  `User::ALL_USERS` and `User::AUTHENTICATED_USERS`.
+- `User::UserId` holds a `UserId`, not a `String`, and `User` has the two
+  new wildcard variants. Add arms for `AllUsers` and `AuthenticatedUsers`
+  to an exhaustive `match`. To parse a subject such as `42`, `allUsers` or
+  `group:eng#member`, use `text.parse::<User>()`.
+- `ReadFilter::by_user` and `CheckClient::read_by_user` take a `User`.
+  Wrap a principal as `User::UserId(id)`.
+- `ExpandResult::user_ids` is a `Vec<UserId>`. The new fields `all_users`
+  and `authenticated_users` report the wildcards. Add them if you build an
+  `ExpandResult` literal.
+- `ResolvedSession::principal` is a `UserId`.
+
+**`Principal` wraps a `UserId` (from 0.2 only).** `Principal::anonymous`,
+`Principal::is_anonymous`, `Principal::as_str`, `auth::ANONYMOUS` and the
+conversions to and from `String` are gone. Call `principal.user_id()`, or
+format it with `Display`. For a route without a session, use
+`WithOptPrincipal`, whose `principal` is `None` for an anonymous caller.
+
+**`CheckResult::UnknownPutativeUser` is gone (from 0.2 only).** `check`
+returns `Ok` or `Forbidden` with the principal the server names. A response
+without a principal is `CallError::UnexpectedResponseFormat`. Delete the
+`UnknownPutativeUser` arm.
+
+**`WriteError` is an exported enum.** Before, it was a struct in a private
 module, so you could only display it. Now `nio_client::WriteError` has three
 variants, and each carries the server's `tonic::Status`:
 
@@ -55,7 +93,8 @@ match client.write(add, del, Some(zookie)).await {
 - `Unauthorized` is the bearer guard's rejection. `WithPrincipal<R,
   BearerTokenAuth>` and `Authenticated<BearerTokenAuth>` now answer a
   missing, malformed or unknown token with 401, `WWW-Authenticate: Bearer`
-  and an `application/problem+json` body. In 0.3 they redirected to sign-in.
+  and an `application/problem+json` body. Before 0.4 they redirected to
+  sign-in.
 
 Rename `MissingSession(loc)` to `SigninRedirect(loc)` in any `match`, and
 add an arm for `Unauthorized`. If an API client followed the bearer
@@ -63,16 +102,16 @@ redirect, make it handle 401 instead.
 
 **The `back=` parameter of the sign-in redirect changed.** It now holds the
 path and query that the browser requested, so it keeps the prefix of a
-nested router. In 0.3 a guard inside `Router::nest("/app", ...)` dropped
-`/app` from `back`. The encoding also leaves `/`
-as is. `/articles/7?q=1` becomes `back=/articles/7%3Fq%3D1`, where 0.3 sent
-`back=%2Farticles%2F7%3Fq%3D1`. If your sign-in page decodes `back` with a
+nested router. Before 0.4 a guard inside `Router::nest("/app", ...)`
+dropped `/app` from `back`. The encoding also leaves `/` as is.
+`/articles/7?q=1` becomes `back=/articles/7%3Fq%3D1`, where 0.2 and 0.3
+sent `back=%2Farticles%2F7%3Fq%3D1`. If your sign-in page decodes `back` with a
 URL decoder, it needs no edit. If it compares the raw string, update the
 comparison.
 
 **`AuthState::new` normalizes the prefix.** The prefix gets one leading
 slash and no trailing slash. `None`, `""` and `"/"` all mean the root.
-`"auth"`, `"/auth"` and `"/auth/"` all mean `/auth`. In 0.3, `"auth"`
+`"auth"`, `"/auth"` and `"/auth/"` all mean `/auth`. Before 0.4, `"auth"`
 produced `auth/signin` and `"/auth/"` produced `/auth//signin`.
 `AuthState::prefix()` returns the normalized value. If you pass a prefix
 without a leading slash or with a trailing slash, check that your sign-in
