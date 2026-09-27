@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::Stream;
 use http::Uri;
-use nio_client::auth::CheckResult;
+use nio_client::auth::{CallError, CheckResult};
 use nio_client::memo::RequestMemo;
 use nio_client::session::{GrpcSessionResolver, ResolverConfig};
 use nio_client::wire;
@@ -779,6 +779,56 @@ async fn watch_streams_heartbeats_and_atomic_writes() {
             start_ts: "resume-ts".into(),
         }
     );
+}
+
+#[tokio::test]
+async fn watch_refuses_empty_start() {
+    let (mock, uri) = start_mock().await;
+    let mut c = client(uri).await;
+    let err = match c
+        .watch(Namespace("doc".into()), Timestamp(String::new()))
+        .await
+    {
+        Ok(_) => panic!("watch with an empty start must fail"),
+        Err(err) => err,
+    };
+    match err {
+        CallError::Status(s) => {
+            assert_eq!(s.code(), tonic::Code::InvalidArgument);
+            assert_eq!(s.message(), "watch doc: start timestamp is required");
+        }
+        other => panic!("expected status error, got {other:?}"),
+    }
+    assert_eq!(mock.lock().watch_requests.len(), 0);
+}
+
+#[tokio::test]
+async fn write_refuses_expiring_delete() {
+    let (mock, uri) = start_mock().await;
+    let mut c = client(uri).await;
+    let exp = chrono::DateTime::from_timestamp(1894785600, 0).unwrap();
+    let plain = Tuple::new(
+        Namespace("doc".into()),
+        Obj("1".into()),
+        Rel::viewer(),
+        User::UserId(uid(1)),
+    );
+    let expiring = Tuple::new(
+        Namespace("doc".into()),
+        Obj("2".into()),
+        Rel::editor(),
+        User::UserId(uid(1)),
+    )
+    .with_expires(exp);
+    let err = c
+        .write(vec![plain.clone()], vec![plain, expiring], None)
+        .await
+        .expect_err("delete with Expires must fail");
+    assert_eq!(
+        err.to_string(),
+        "write tuples grpc call: InvalidArgument: write del[1]: tuple doc:2#editor: a deleted tuple cannot carry Expires"
+    );
+    assert_eq!(mock.lock().write_requests.len(), 0);
 }
 
 #[tokio::test]
