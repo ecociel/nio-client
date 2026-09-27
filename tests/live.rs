@@ -285,10 +285,10 @@ async fn conditional_write_conflicts_on_stale_precondition() {
         .await
         .expect_err("write at a stale precondition must fail");
     println!("conditional write: {err}");
-    let status = std::error::Error::source(&err)
-        .and_then(|s| s.downcast_ref::<tonic::Status>())
-        .expect("write error carries a gRPC status");
-    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        matches!(&err, nio_client::WriteError::ZookieConflict(s) if s.code() == tonic::Code::FailedPrecondition),
+        "expected ZookieConflict, got {err:?}"
+    );
 }
 
 #[tokio::test]
