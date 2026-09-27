@@ -195,6 +195,10 @@ impl Lru {
             self.recency.remove(&gen);
         }
     }
+
+    fn len(&self) -> usize {
+        self.map.len()
+    }
 }
 
 type FillResult = Result<Option<ResolvedSession>, Arc<ResolveError>>;
@@ -217,6 +221,7 @@ impl SingleFlight {
         let shared = {
             let mut map = self.inflight.lock().expect("singleflight mutex poisoned");
             if let Some((_, existing)) = map.get(key) {
+                crate::metrics::singleflight("follower");
                 existing.clone()
             } else {
                 let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -236,12 +241,15 @@ impl SingleFlight {
                         .unwrap_or(false)
                     {
                         map.remove(&owned_key);
+                        crate::metrics::singleflight_inflight(map.len());
                     }
                     result
                 }
                 .boxed()
                 .shared();
                 map.insert(key.to_string(), (id, fut.clone()));
+                crate::metrics::singleflight_inflight(map.len());
+                crate::metrics::singleflight("leader");
                 // Detach the fill (Go: detached context): it completes and
                 // populates the cache even if every waiter is cancelled.
                 tokio::spawn(fut.clone());
@@ -271,6 +279,16 @@ impl ResolverInner {
         self: Arc<Self>,
         hash: String,
     ) -> Result<Option<ResolvedSession>, ResolveError> {
+        let started = Instant::now();
+        let result = self.resolve_inner(hash).await;
+        crate::metrics::resolver_resolve_duration(started.elapsed());
+        result
+    }
+
+    async fn resolve_inner(
+        self: Arc<Self>,
+        hash: String,
+    ) -> Result<Option<ResolvedSession>, ResolveError> {
         let now = Instant::now();
         let now_wall = Utc::now();
 
@@ -286,15 +304,23 @@ impl ResolverInner {
             };
             if !wall_valid {
                 // Positive entry past its session expiry: forced miss.
-                self.cache
-                    .lock()
-                    .expect("session cache mutex poisoned")
-                    .remove(&hash);
+                let mut guard = self.cache.lock().expect("session cache mutex poisoned");
+                guard.remove(&hash);
+                crate::metrics::resolver_entries(guard.len());
             } else if now < entry.fresh_until {
                 // Hit. Refresh-ahead for hot positive entries.
+                crate::metrics::resolver_event(if entry.outcome.is_some() {
+                    "hit"
+                } else {
+                    "negative_hit"
+                });
+                crate::metrics::resolver_served_age(
+                    now.saturating_duration_since(entry.fetched_at),
+                );
                 if entry.outcome.is_some() {
                     let remaining = entry.fresh_until.saturating_duration_since(now);
                     if remaining.as_secs_f64() < 0.10 * entry.effective_ttl.as_secs_f64() {
+                        crate::metrics::resolver_event("refresh_ahead");
                         self.clone().spawn_refresh(hash.clone());
                     }
                 }
@@ -303,6 +329,7 @@ impl ResolverInner {
         }
 
         // 2. Miss (or stale): capture a stale candidate, then single-flight fill.
+        crate::metrics::resolver_event("miss");
         let stale = self.stale_candidate(&hash, now, now_wall);
         let this = self.clone();
         let key = hash.clone();
@@ -318,8 +345,12 @@ impl ResolverInner {
             Ok(v) => Ok(v),
             Err(e) => {
                 if e.is_transport() {
-                    if let Some((s, _fetched_at)) = stale {
+                    if let Some((s, fetched_at)) = stale {
                         log::warn!("session resolver: serving stale entry on transport error: {e}");
+                        crate::metrics::resolver_event("stale_if_error");
+                        crate::metrics::resolver_served_age(
+                            now.saturating_duration_since(fetched_at),
+                        );
                         return Ok(Some(s));
                     }
                 }
@@ -329,11 +360,23 @@ impl ResolverInner {
     }
 
     async fn fill(self: Arc<Self>, hash: String) -> Result<Option<ResolvedSession>, ResolveError> {
+        let started = Instant::now();
         let fetched = tokio::time::timeout(RESOLVE_TIMEOUT, self.fetcher.fetch(&hash))
             .await
-            .map_err(|_| {
-                ResolveError::Transport("session resolve timed out after 5s".to_string())
-            })??;
+            .unwrap_or_else(|_| {
+                Err(ResolveError::Transport(
+                    "session resolve timed out after 5s".to_string(),
+                ))
+            });
+        crate::metrics::resolver_fetch(
+            match &fetched {
+                Ok(Some(_)) => "ok",
+                Ok(None) => "not_found",
+                Err(_) => "error",
+            },
+            started.elapsed(),
+        );
+        let fetched = fetched?;
         let now = Instant::now();
         let entry = match &fetched {
             Some(s) => {
@@ -361,6 +404,7 @@ impl ResolverInner {
         {
             let mut guard = self.cache.lock().expect("session cache mutex poisoned");
             guard.put(hash, entry);
+            crate::metrics::resolver_entries(guard.len());
         }
         Ok(fetched)
     }
@@ -437,6 +481,7 @@ impl SessionResolver for CachedResolver {
             .lock()
             .expect("session cache mutex poisoned");
         guard.remove(token_hash);
+        crate::metrics::resolver_entries(guard.len());
     }
 }
 

@@ -31,10 +31,20 @@ tasks:
     cmds:
       - cargo clippy --all-targets --features axum -- -D warnings
 
+  lint-metrics:
+    desc: Clippy on all targets with the metrics feature, warnings are errors
+    cmds:
+      - cargo clippy --all-targets --features axum,metrics -- -D warnings
+
   test:
     desc: Unit + mock-server integration tests (no live server needed)
     cmds:
       - cargo test --features axum
+
+  test-metrics:
+    desc: Unit + mock tests with the metrics feature (registry assertions)
+    cmds:
+      - cargo test --features axum,metrics
 
   test-live:
     desc: Live-server tests against the stack-up stack (override with NIO_CHECK_URI, NIO_SESSION_URI, NIO_BASE_URI)
@@ -83,12 +93,14 @@ tasks:
       - rm -rf "${NIO_DATA_DIR:-./.nio-data}"
 
   ci:
-    desc: Full gate - format check, lint, build, test
+    desc: Full gate - format check, lint, build, test, with and without metrics
     cmds:
       - task: fmt-check
       - task: lint
+      - task: lint-metrics
       - task: build
       - task: test
+      - task: test-metrics
 
   example-check:
     desc: "Run the check example: task example-check -- <ns> <obj> <rel> <userid> [zookie] (needs NIO_CHECK_URI)"

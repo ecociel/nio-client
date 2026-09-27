@@ -4,7 +4,7 @@
 //! into the client model.
 
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::Stream;
@@ -346,48 +346,6 @@ async fn check_impossible_short_circuits_without_rpc() {
         .expect("check");
     assert!(matches!(res, CheckResult::Forbidden(p) if p.user_id() == uid(1)));
     assert!(mock.lock().check_requests.is_empty(), "no RPC must be made");
-}
-
-#[tokio::test]
-async fn observe_check_reports_outcome_and_errors() {
-    let (mock, uri) = start_mock().await;
-    mock.lock().check_response = Some(wire::CheckResponse {
-        principal: Some(wire::Principal { id: 42 }),
-        ok: true,
-    });
-    let observed_ok = Arc::new(AtomicBool::new(false));
-    let observed_err = Arc::new(AtomicBool::new(false));
-    let (ok_flag, err_flag) = (observed_ok.clone(), observed_err.clone());
-    let mut c = client(uri).await.with_observe_check(Arc::new(
-        move |_ns, _obj, _rel, _user, _duration, ok, is_error| {
-            ok_flag.store(ok, Ordering::Relaxed);
-            err_flag.store(is_error, Ordering::Relaxed);
-        },
-    ));
-    c.check(
-        Namespace("doc".into()),
-        Obj("1".into()),
-        Rel::viewer(),
-        uid(1),
-        None,
-    )
-    .await
-    .expect("check");
-    assert!(observed_ok.load(Ordering::Relaxed));
-    assert!(!observed_err.load(Ordering::Relaxed));
-
-    mock.lock().check_fail_next = true;
-    let _ = c
-        .check(
-            Namespace("doc".into()),
-            Obj("1".into()),
-            Rel::viewer(),
-            uid(1),
-            None,
-        )
-        .await
-        .expect_err("must fail");
-    assert!(observed_err.load(Ordering::Relaxed));
 }
 
 #[tokio::test]
@@ -1089,37 +1047,6 @@ async fn memo_concurrent_identical_misses_single_flight() {
 }
 
 #[tokio::test]
-async fn observe_list_reports_outcome_and_errors() {
-    let (mock, uri) = start_mock().await;
-    mock.lock().list_response = Some(wire::ListResponse {
-        objs: vec![],
-        ts: "t".into(),
-    });
-    let observed = Arc::new(AtomicUsize::new(0));
-    let errored = Arc::new(AtomicBool::new(false));
-    let (obs, err_flag) = (observed.clone(), errored.clone());
-    let mut c = client(uri).await.with_observe_list(Arc::new(
-        move |_ns, _rel, _user, _duration, is_error| {
-            obs.fetch_add(1, Ordering::Relaxed);
-            err_flag.store(is_error, Ordering::Relaxed);
-        },
-    ));
-    c.list(Namespace("doc".into()), Rel::viewer(), uid(1), None)
-        .await
-        .expect("list");
-    assert_eq!(observed.load(Ordering::Relaxed), 1);
-    assert!(!errored.load(Ordering::Relaxed));
-
-    mock.lock().list_fail_next = true;
-    let _ = c
-        .list(Namespace("doc".into()), Rel::viewer(), uid(1), None)
-        .await
-        .expect_err("must fail");
-    assert_eq!(observed.load(Ordering::Relaxed), 2);
-    assert!(errored.load(Ordering::Relaxed));
-}
-
-#[tokio::test]
 async fn read_by_user_and_user_set_send_reverse_filters() {
     let (mock, uri) = start_mock().await;
     let mut c = client(uri).await;
@@ -1428,5 +1355,308 @@ mod axum_extractors {
             .expect("authenticated");
         assert_eq!(got.principal, uid(42));
         assert!(mock.lock().check_requests.is_empty(), "no check RPC");
+    }
+}
+
+#[cfg(feature = "metrics")]
+mod metrics {
+    use super::*;
+    use nio_client::metrics::prometheus_client::encoding::text::encode;
+    use nio_client::metrics::prometheus_client::registry::Registry;
+    use nio_client::session::{
+        CachedResolver, ResolveError, ResolveFuture, ResolvedSession, SessionFetcher,
+        SessionResolver,
+    };
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    const ISOLATED: &str = "NIO_METRICS_ISOLATED";
+
+    /// The metric families are process-global and the other tests in this
+    /// binary drive the same RPCs and resolvers in parallel, so each metrics
+    /// test reruns alone in a fresh child process where its counts are exact.
+    /// Returns true in the parent, which then has nothing left to do.
+    fn rerun_isolated(test: &str) -> bool {
+        if std::env::var_os(ISOLATED).is_some() {
+            return false;
+        }
+        let out = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([test, "--exact", "--test-threads=1", "--nocapture"])
+            .env(ISOLATED, "1")
+            .output()
+            .expect("spawn isolated test");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "isolated run of {test} failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        true
+    }
+
+    fn scrape() -> String {
+        let mut registry = Registry::default();
+        nio_client::metrics::register(&mut registry);
+        let mut text = String::new();
+        encode(&mut text, &registry).expect("encode");
+        text
+    }
+
+    fn assert_scrape_has(lines: &[&str]) {
+        let text = scrape();
+        for line in lines {
+            assert!(
+                text.lines().any(|l| l == *line),
+                "missing `{line}` in scrape:\n{text}"
+            );
+        }
+    }
+
+    fn doc() -> Namespace {
+        Namespace("doc".into())
+    }
+
+    #[tokio::test]
+    async fn check_rpc_is_counted_by_code() {
+        if rerun_isolated("metrics::check_rpc_is_counted_by_code") {
+            return;
+        }
+        let (mock, uri) = start_mock().await;
+        mock.lock().check_response = Some(wire::CheckResponse {
+            principal: Some(wire::Principal { id: 42 }),
+            ok: true,
+        });
+        let mut c = client(uri).await;
+        c.check(doc(), Obj("1".into()), Rel::viewer(), uid(1), None)
+            .await
+            .expect("check");
+        mock.lock().check_fail_next = true;
+        c.check(doc(), Obj("1".into()), Rel::viewer(), uid(1), None)
+            .await
+            .expect_err("must fail");
+        c.check(doc(), Obj("1".into()), Rel::impossible(), uid(1), None)
+            .await
+            .expect("impossible short-circuits");
+
+        assert_scrape_has(&[
+            r#"nio_check_client_requests_total{rpc="check",code="ok"} 1"#,
+            r#"nio_check_client_requests_total{rpc="check",code="internal"} 1"#,
+            r#"nio_check_client_request_duration_seconds_count{rpc="check"} 2"#,
+        ]);
+    }
+
+    #[tokio::test]
+    async fn list_rpc_is_counted_by_code() {
+        if rerun_isolated("metrics::list_rpc_is_counted_by_code") {
+            return;
+        }
+        let (mock, uri) = start_mock().await;
+        let mut c = client(uri).await;
+        c.list(doc(), Rel::viewer(), uid(1), None)
+            .await
+            .expect("list");
+        mock.lock().list_fail_next = true;
+        c.list(doc(), Rel::viewer(), uid(1), None)
+            .await
+            .expect_err("must fail");
+
+        assert_scrape_has(&[
+            r#"nio_check_client_requests_total{rpc="list",code="ok"} 1"#,
+            r#"nio_check_client_requests_total{rpc="list",code="internal"} 1"#,
+            r#"nio_check_client_request_duration_seconds_count{rpc="list"} 2"#,
+        ]);
+    }
+
+    #[tokio::test]
+    async fn every_rpc_is_counted_under_its_name() {
+        if rerun_isolated("metrics::every_rpc_is_counted_under_its_name") {
+            return;
+        }
+        let (mock, uri) = start_mock().await;
+        let mut c = client(uri).await;
+        let tuple = Tuple::new(doc(), Obj("1".into()), Rel::viewer(), User::UserId(uid(1)));
+        c.expand(doc(), Obj("1".into()), Rel::viewer(), None)
+            .await
+            .expect("expand");
+        c.content_change_check(doc(), Obj("1".into()), Rel::viewer(), uid(1))
+            .await
+            .expect("content_change_check");
+        c.get_all(&doc(), &Obj("1".into())).await.expect("read");
+        c.write(vec![tuple.clone()], vec![tuple.clone()], None)
+            .await
+            .expect("write");
+        mock.lock().write_error = Some(Status::unavailable("check down"));
+        c.add_one(tuple).await.expect_err("must fail");
+        c.watch(doc(), Timestamp::empty()).await.expect("watch");
+        c.list_namespaces().await.expect("list_namespaces");
+
+        assert_scrape_has(&[
+            r#"nio_check_client_requests_total{rpc="expand",code="ok"} 1"#,
+            r#"nio_check_client_requests_total{rpc="content_change_check",code="ok"} 1"#,
+            r#"nio_check_client_requests_total{rpc="read",code="ok"} 1"#,
+            r#"nio_check_client_requests_total{rpc="write",code="ok"} 1"#,
+            r#"nio_check_client_requests_total{rpc="write",code="unavailable"} 1"#,
+            r#"nio_check_client_requests_total{rpc="watch",code="ok"} 1"#,
+            r#"nio_check_client_requests_total{rpc="list_namespaces",code="ok"} 1"#,
+            r#"nio_check_client_request_duration_seconds_count{rpc="expand"} 1"#,
+            r#"nio_check_client_request_duration_seconds_count{rpc="content_change_check"} 1"#,
+            r#"nio_check_client_request_duration_seconds_count{rpc="read"} 1"#,
+            r#"nio_check_client_request_duration_seconds_count{rpc="write"} 2"#,
+            r#"nio_check_client_request_duration_seconds_count{rpc="watch"} 1"#,
+            r#"nio_check_client_request_duration_seconds_count{rpc="list_namespaces"} 1"#,
+        ]);
+        assert!(
+            !scrape().contains(r#"rpc="add""#),
+            "a write is labelled write, never add"
+        );
+    }
+
+    fn session() -> ResolvedSession {
+        ResolvedSession {
+            principal: uid(42),
+            tenant_id: "t1".into(),
+            expires_at: chrono::Utc::now() + chrono::TimeDelta::hours(1),
+        }
+    }
+
+    /// Answers with `session` until `fail` is set, then with a transport
+    /// error. `gate` holds every fetch until a permit is added.
+    struct ScriptedFetcher {
+        session: Option<ResolvedSession>,
+        fail: AtomicBool,
+        gate: Option<Arc<tokio::sync::Semaphore>>,
+        calls: AtomicUsize,
+    }
+
+    impl ScriptedFetcher {
+        fn new(session: Option<ResolvedSession>) -> Self {
+            ScriptedFetcher {
+                session,
+                fail: AtomicBool::new(false),
+                gate: None,
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl SessionFetcher for ScriptedFetcher {
+        fn fetch<'a>(&'a self, _token_hash: &'a str) -> ResolveFuture<'a> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async move {
+                if let Some(gate) = &self.gate {
+                    let _permit = gate.acquire().await.expect("gate closed");
+                }
+                if self.fail.load(Ordering::Relaxed) {
+                    return Err(ResolveError::Transport("session down".into()));
+                }
+                Ok(self.session.clone())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn resolver_counts_miss_then_hit() {
+        if rerun_isolated("metrics::resolver_counts_miss_then_hit") {
+            return;
+        }
+        let fetcher = Arc::new(ScriptedFetcher::new(Some(session())));
+        let r = CachedResolver::new(fetcher, ResolverConfig::default());
+        r.resolve("k").await.expect("resolve").expect("session");
+        r.resolve("k").await.expect("resolve").expect("session");
+
+        assert_scrape_has(&[
+            r#"nio_session_resolver_events_total{event="miss"} 1"#,
+            r#"nio_session_resolver_events_total{event="hit"} 1"#,
+            r#"nio_session_resolver_fetch_duration_seconds_count{result="ok"} 1"#,
+            "nio_session_resolver_resolve_duration_seconds_count 2",
+            "nio_session_resolver_served_age_seconds_count 1",
+            r#"nio_session_resolver_singleflight_total{event="leader"} 1"#,
+            "nio_session_resolver_inflight 0",
+            "nio_session_resolver_entries 1",
+        ]);
+    }
+
+    #[tokio::test]
+    async fn resolver_counts_negative_hit() {
+        if rerun_isolated("metrics::resolver_counts_negative_hit") {
+            return;
+        }
+        let fetcher = Arc::new(ScriptedFetcher::new(None));
+        let r = CachedResolver::new(fetcher, ResolverConfig::default());
+        assert!(r.resolve("unknown").await.expect("resolve").is_none());
+        assert!(r.resolve("unknown").await.expect("resolve").is_none());
+
+        assert_scrape_has(&[
+            r#"nio_session_resolver_events_total{event="miss"} 1"#,
+            r#"nio_session_resolver_events_total{event="negative_hit"} 1"#,
+            r#"nio_session_resolver_fetch_duration_seconds_count{result="not_found"} 1"#,
+        ]);
+    }
+
+    #[tokio::test]
+    async fn resolver_counts_stale_serve_on_transport_error() {
+        if rerun_isolated("metrics::resolver_counts_stale_serve_on_transport_error") {
+            return;
+        }
+        let fetcher = Arc::new(ScriptedFetcher::new(Some(session())));
+        let cfg = ResolverConfig {
+            l1_ttl: Duration::from_millis(1),
+            stale_if_error: Duration::from_secs(60),
+            ..ResolverConfig::default()
+        };
+        let r = CachedResolver::new(fetcher.clone(), cfg);
+        r.resolve("k").await.expect("resolve").expect("session");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        fetcher.fail.store(true, Ordering::Relaxed);
+        r.resolve("k").await.expect("stale serve").expect("session");
+
+        assert_scrape_has(&[
+            r#"nio_session_resolver_events_total{event="miss"} 2"#,
+            r#"nio_session_resolver_events_total{event="stale_if_error"} 1"#,
+            r#"nio_session_resolver_fetch_duration_seconds_count{result="ok"} 1"#,
+            r#"nio_session_resolver_fetch_duration_seconds_count{result="error"} 1"#,
+            "nio_session_resolver_served_age_seconds_count 1",
+        ]);
+    }
+
+    #[tokio::test]
+    async fn resolver_counts_singleflight_followers() {
+        if rerun_isolated("metrics::resolver_counts_singleflight_followers") {
+            return;
+        }
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let fetcher = Arc::new(ScriptedFetcher {
+            gate: Some(gate.clone()),
+            ..ScriptedFetcher::new(Some(session()))
+        });
+        let r = CachedResolver::new(fetcher.clone(), ResolverConfig::default());
+        let waiters: Vec<_> = (0..50)
+            .map(|_| {
+                let r = r.clone();
+                tokio::spawn(async move { r.resolve("cold").await })
+            })
+            .collect();
+        let follower_line = r#"nio_session_resolver_singleflight_total{event="follower"} 49"#;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !scrape().lines().any(|l| l == follower_line) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("49 followers join the leader's fill");
+        assert_scrape_has(&["nio_session_resolver_inflight 1"]);
+
+        gate.add_permits(1);
+        for w in waiters {
+            w.await.expect("join").expect("resolve").expect("session");
+        }
+        assert_eq!(fetcher.calls.load(Ordering::Relaxed), 1, "one fetch");
+        assert_scrape_has(&[
+            r#"nio_session_resolver_singleflight_total{event="leader"} 1"#,
+            r#"nio_session_resolver_singleflight_total{event="follower"} 49"#,
+            r#"nio_session_resolver_events_total{event="miss"} 50"#,
+            r#"nio_session_resolver_fetch_duration_seconds_count{result="ok"} 1"#,
+            "nio_session_resolver_inflight 0",
+        ]);
     }
 }

@@ -195,15 +195,51 @@ and then re-checks expecting to observe its own write.
 `RequestMemo::with_timestamp` pins the evaluation zookie for the request;
 `RequestMemo::with_observer` reports per-lookup hit/miss.
 
+# Metrics
+
+The `metrics` feature exports the Prometheus series of nio's own Rust client,
+`check_client`, with the same names, labels and buckets:
+
+- `nio_check_client_requests_total{rpc,code}` and
+  `nio_check_client_request_duration_seconds{rpc}` for every `CheckClient`
+  RPC. `rpc` is `check`, `list`, `expand`, `content_change_check`, `read`,
+  `write`, `watch` or `list_namespaces`. `code` is the lowercase gRPC status,
+  such as `ok` or `unavailable`.
+- Seven `nio_session_resolver_*` families for `CachedResolver`: cache events
+  (`hit`, `negative_hit`, `miss`, `stale_if_error`, `refresh_ahead`),
+  resolve and fetch duration, served entry age, single-flight roles
+  (`leader`, `follower`), fills in flight and resident L1 entries.
+
+Register the families once into the registry you export:
+
+```rust,ignore
+use nio_client::metrics::prometheus_client::registry::Registry;
+
+let mut registry = Registry::default();
+nio_client::metrics::register(&mut registry);
+```
+
+The families are process-global. Register them into one registry per
+process. A second registry exports the same counts again. `nio_client::metrics`
+re-exports `prometheus_client`, so your registry uses the same version.
+Without the feature, the crate does not depend on `prometheus-client` and
+every instrument point compiles to nothing.
+
+These series replace `CheckClient::with_observe_check` and
+`CheckClient::with_observe_list`, which are removed together with the
+`ObserveCheckFn` and `ObserveListFn` types.
+
 # Building and testing
 
 A [Taskfile](https://taskfile.dev) drives the workflow:
 
     task build       # cargo build --features axum
-    task lint        # clippy, warnings are errors
-    task test        # unit + in-process mock gRPC server tests
-    task test-live   # live tests against the stack from task stack-up
-    task ci          # fmt-check + lint + build + test
+    task lint           # clippy, warnings are errors
+    task lint-metrics   # clippy with the metrics feature
+    task test           # unit + in-process mock gRPC server tests
+    task test-metrics   # the same tests plus registry assertions
+    task test-live      # live tests against the stack from task stack-up
+    task ci             # fmt-check + both lints + build + both test runs
     task example-check -- customer acme customer.update 42
 
 Without a zookie, `check` evaluates at nio's default snapshot, which can
