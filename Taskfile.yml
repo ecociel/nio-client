@@ -37,12 +37,50 @@ tasks:
       - cargo test --features axum
 
   test-live:
-    desc: Live-server tests against NIO_CHECK_URI (e.g. http://localhost:50051)
-    preconditions:
-      - sh: test -n "$NIO_CHECK_URI"
-        msg: "NIO_CHECK_URI must be set (e.g. http://localhost:50051)"
+    desc: Live-server tests against the stack-up stack (override with NIO_CHECK_URI, NIO_SESSION_URI, NIO_BASE_URI)
     cmds:
-      - cargo test --features live-tests --test live -- --nocapture
+      - >-
+        NIO_CHECK_URI=${NIO_CHECK_URI:-http://localhost:${NIO_CHECK_PORT:-50051}}
+        NIO_SESSION_URI=${NIO_SESSION_URI:-http://localhost:${NIO_SESSION_PORT:-50052}}
+        NIO_BASE_URI=${NIO_BASE_URI:-http://localhost:${NIO_HTTP_PORT:-8090}/auth}
+        cargo test --features live-tests --test live -- --nocapture
+
+  stack-up:
+    desc: Start nio check and nio-client on SQLite and wait until both answer (ports from NIO_CHECK_PORT, NIO_SESSION_PORT, NIO_HTTP_PORT)
+    preconditions:
+      - sh: command -v docker
+        msg: "docker is required"
+      - sh: command -v grpcurl
+        msg: "grpcurl is required to wait for the stack"
+    cmds:
+      - mkdir -p "${NIO_DATA_DIR:-./.nio-data}"
+      - docker compose up -d
+      - silent: true
+        cmd: |
+          check=localhost:${NIO_CHECK_PORT:-50051}
+          session=localhost:${NIO_SESSION_PORT:-50052}
+          deadline=$(( $(date +%s) + 120 ))
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            if grpcurl -plaintext -max-time 2 -import-path proto -proto iam.proto \
+                 -d '{"ns":"project","obj":"p42","rel":"project.get","userId":"1"}' \
+                 "$check" am.CheckService/check >/dev/null 2>&1 &&
+               grpcurl -plaintext -max-time 2 -import-path proto -proto sessions.proto \
+                 -d '{"token_hash":"0000000000000000000000000000000000000000000000000000000000000000"}' \
+                 "$session" am.SessionService/resolve >/dev/null 2>&1; then
+              echo "am.CheckService answers on $check, am.SessionService on $session"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "the nio stack did not answer within 120 s" >&2
+          docker compose logs --tail 20 >&2
+          exit 1
+
+  stack-down:
+    desc: Stop the nio stack and delete its SQLite databases
+    cmds:
+      - docker compose down -v --remove-orphans
+      - rm -rf "${NIO_DATA_DIR:-./.nio-data}"
 
   ci:
     desc: Full gate - format check, lint, build, test
