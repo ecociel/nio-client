@@ -222,8 +222,8 @@ nio_client::metrics::register(&mut registry);
 The families are process-global. Register them into one registry per
 process. A second registry exports the same counts again. `nio_client::metrics`
 re-exports `prometheus_client`, so your registry uses the same version.
-Without the feature, the crate does not depend on `prometheus-client` and
-every instrument point compiles to nothing.
+Without the feature, the crate does not depend on `prometheus-client`, and
+an instrument point costs only the clock reads that time the call.
 
 These series replace `CheckClient::with_observe_check` and
 `CheckClient::with_observe_list`, which are removed together with the
@@ -233,7 +233,7 @@ These series replace `CheckClient::with_observe_check` and
 
 A [Taskfile](https://taskfile.dev) drives the workflow:
 
-    task build       # cargo build --features axum
+    task build          # cargo build --features axum
     task lint           # clippy, warnings are errors
     task lint-metrics   # clippy with the metrics feature
     task test           # unit + in-process mock gRPC server tests
