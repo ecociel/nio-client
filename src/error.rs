@@ -1,7 +1,7 @@
 use std::fmt::{Display, Formatter};
 
 use tonic::transport::Error;
-use tonic::Status;
+use tonic::{Code, Status};
 
 #[derive(thiserror::Error, Debug)]
 pub enum ParseErrorKind {
@@ -42,29 +42,58 @@ impl std::error::Error for ConnectError {
     }
 }
 
+/// Errors from the write calls. Every variant carries the server status.
 #[derive(Debug)]
-pub struct WriteError(pub(super) Status);
+pub enum WriteError {
+    /// `FAILED_PRECONDITION`: a tuple this write touches changed after the
+    /// precondition zookie. Re-read, then retry with the fresh zookie.
+    ZookieConflict(Status),
+    /// `INVALID_ARGUMENT`: the precondition zookie is not older than this
+    /// write's commit. Pass a zookie the server returned.
+    FutureZookie(Status),
+    /// Any other gRPC transport or server status.
+    Grpc(Status),
+}
+
+impl WriteError {
+    fn status(&self) -> &Status {
+        match self {
+            WriteError::ZookieConflict(status)
+            | WriteError::FutureZookie(status)
+            | WriteError::Grpc(status) => status,
+        }
+    }
+}
 
 impl Display for WriteError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let status = self.status();
         write!(
             f,
             "write tuples grpc call: {:?}: {}",
-            self.0.code(),
-            self.0.message()
+            status.code(),
+            status.message()
         )
     }
 }
 
 impl std::error::Error for WriteError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.0)
+        Some(self.status())
     }
 }
 
+const FUTURE_ZOOKIE_MARKER: &str = "is not strictly before the store fence";
+
 impl From<Status> for WriteError {
-    fn from(value: Status) -> Self {
-        WriteError(value)
+    fn from(status: Status) -> Self {
+        match status.code() {
+            Code::FailedPrecondition => WriteError::ZookieConflict(status),
+            Code::InvalidArgument if status.message().contains(FUTURE_ZOOKIE_MARKER) => {
+                WriteError::FutureZookie(status)
+            }
+            _ => WriteError::Grpc(status),
+        }
     }
 }
 
