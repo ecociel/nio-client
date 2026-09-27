@@ -11,6 +11,7 @@ use error::WriteError;
 pub use error::{ConnectError, ParseError};
 use http::Uri;
 use tonic::transport::{Channel, ClientTlsConfig};
+use tonic::Status;
 
 pub mod auth;
 #[cfg(feature = "axum")]
@@ -765,12 +766,20 @@ impl CheckClient {
     /// §2.4.6). Only changes committed after `start_ts` are delivered,
     /// oldest-first, interleaved with heartbeats (empty updates). Drop the
     /// stream to stop. Resume later by passing any previously received
-    /// event's `ts` as `start_ts`.
+    /// event's `ts` as `start_ts`, or [`Timestamp::empty`] to start at the
+    /// oldest retained change. An empty string is refused without a call.
     pub async fn watch(
         &mut self,
         ns: Namespace,
         start_ts: Timestamp,
     ) -> Result<WatchStream, CallError> {
+        if start_ts.0.is_empty() {
+            return Err(Status::invalid_argument(format!(
+                "watch {}: start timestamp is required",
+                ns.0
+            ))
+            .into());
+        }
         let r = pb::WatchRequest {
             ns: ns.0,
             start_ts: start_ts.0,
@@ -891,13 +900,25 @@ impl CheckClient {
 
     /// Commits `add` and `del` tuples atomically. `precondition` is an
     /// optional OCC zookie; `None` is an unconditional write. Returns the
-    /// commit zookie for read-your-writes / chaining subsequent reads.
+    /// commit zookie for read-your-writes / chaining subsequent reads. A
+    /// tuple in `del` that carries an expiry is refused without a call.
     pub async fn write(
         &mut self,
         add: Vec<Tuple>,
         del: Vec<Tuple>,
         precondition: Option<Timestamp>,
     ) -> Result<Timestamp, WriteError> {
+        if let Some((i, t)) = del
+            .iter()
+            .enumerate()
+            .find(|(_, t)| matches!(t.condition, Some(Condition::Expires(_))))
+        {
+            return Err(Status::invalid_argument(format!(
+                "write del[{i}]: tuple {}:{}#{}: a deleted tuple cannot carry Expires",
+                t.ns.0, t.obj.0, t.rel.0
+            ))
+            .into());
+        }
         let request = pb::WriteRequest {
             ts: precondition.map(|t| t.0),
             add_tuples: add.into_iter().map(tuple_to_pb).collect(),
