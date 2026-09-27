@@ -1,9 +1,9 @@
 [package]
 name = "nio-client"
-version = "0.3.0"
+version = "0.4.0"
 description = "Client for nio authentication and authorization."
 edition = "2021"
-rust-version = "1.83"
+rust-version = "1.85"
 readme = "README.md"
 repository = "https://github.com/ecociel/nio-client"
 license = "MIT"
