@@ -15,7 +15,7 @@ use nio_client::session::{GrpcSessionResolver, ResolverConfig};
 use nio_client::wire;
 use nio_client::{
     connect_channel, CheckClient, Namespace, Obj, ReadFilter, Rel, Timestamp, Tuple, User, UserId,
-    UserSet,
+    UserSet, WriteError,
 };
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -1187,18 +1187,51 @@ async fn add_many_commits_one_atomic_write() {
     assert_eq!(reqs[0].add_tuples.len(), 2);
 }
 
-#[tokio::test]
-async fn write_error_shows_server_status() {
+async fn rejected_write(status: Status) -> WriteError {
     let (mock, uri) = start_mock().await;
-    mock.lock().write_error = Some(Status::invalid_argument("obj 'a_b': invalid syntax"));
+    mock.lock().write_error = Some(status);
     let mut c = client(uri).await;
     let t = Tuple::new(
         Namespace("doc".into()),
-        Obj("a_b".into()),
+        Obj("1".into()),
         Rel::viewer(),
         User::UserId(uid(1)),
     );
-    let err = c.add_one(t).await.expect_err("server rejects the write");
+    c.write(vec![t], vec![], Some(Timestamp("AQAAAAAAAQ==".into())))
+        .await
+        .expect_err("server rejects the write")
+}
+
+#[tokio::test]
+async fn write_conflict_is_zookie_conflict() {
+    let err = rejected_write(Status::failed_precondition(
+        "doc:1#viewer was modified at AQAAAAAAAg== after the presented zookie AQAAAAAAAQ==",
+    ))
+    .await;
+    assert!(matches!(err, WriteError::ZookieConflict(_)), "{err:?}");
+    assert_eq!(
+        err.to_string(),
+        "write tuples grpc call: FailedPrecondition: doc:1#viewer was modified at AQAAAAAAAg== after the presented zookie AQAAAAAAAQ=="
+    );
+}
+
+#[tokio::test]
+async fn write_future_zookie_is_future_zookie() {
+    let err = rejected_write(Status::invalid_argument(
+        "write zookie AQAAAAAAAQ== is not strictly before the store fence AQAAAAAAAA== (#262)",
+    ))
+    .await;
+    assert!(matches!(err, WriteError::FutureZookie(_)), "{err:?}");
+    assert_eq!(
+        err.to_string(),
+        "write tuples grpc call: InvalidArgument: write zookie AQAAAAAAAQ== is not strictly before the store fence AQAAAAAAAA== (#262)"
+    );
+}
+
+#[tokio::test]
+async fn write_other_status_is_grpc() {
+    let err = rejected_write(Status::invalid_argument("obj 'a_b': invalid syntax")).await;
+    assert!(matches!(err, WriteError::Grpc(_)), "{err:?}");
     assert_eq!(
         err.to_string(),
         "write tuples grpc call: InvalidArgument: obj 'a_b': invalid syntax"

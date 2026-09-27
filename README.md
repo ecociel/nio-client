@@ -135,6 +135,14 @@ let res = client.check(ns, obj, rel, user_id, Some(ts)).await?;
 optional OCC precondition zookie (`None` = unconditional). Tuples may carry
 an expiry condition (`Tuple::with_expires`).
 
+A rejected write returns a `WriteError` you can match on:
+
+- `ZookieConflict`: a tuple changed after the precondition zookie. Re-read, then retry with the fresh zookie.
+- `FutureZookie`: the precondition zookie is not from a prior server response.
+- `Grpc`: any other server or transport status.
+
+Each variant carries the gRPC `Status`. The error's `Display` shows the status code and the server message.
+
 `content_change_check` authorizes a content modification at the freshest
 snapshot and returns the zookie to store with the new content version.
 
