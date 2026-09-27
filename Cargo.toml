@@ -42,9 +42,6 @@ tokio-stream = { version = "0.1", features = ["net"] }
 [features]
 default = []
 axum = ["dep:axum", "dep:axum-extra"]
-# Session-resolver and check-RPC instrumentation (nio_session_resolver_*,
-# nio_check_client_*); the host registers via `metrics::register`. Off, the
-# instrument points compile to nothing.
 metrics = ["dep:prometheus-client"]
 # Opt-in live-server integration tests (tests/live.rs); require a running
 # check reachable at NIO_CHECK_URI.

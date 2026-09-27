@@ -1372,10 +1372,9 @@ mod metrics {
 
     const ISOLATED: &str = "NIO_METRICS_ISOLATED";
 
-    /// The metric families are process-global and the other tests in this
-    /// binary drive the same RPCs and resolvers in parallel, so each metrics
-    /// test reruns alone in a fresh child process where its counts are exact.
-    /// Returns true in the parent, which then has nothing left to do.
+    // The families are process-global, as in check_client, and the other
+    // tests here drive the same RPCs in parallel. A child process running
+    // one test is the only place its counts are exact.
     fn rerun_isolated(test: &str) -> bool {
         if std::env::var_os(ISOLATED).is_some() {
             return false;
@@ -1519,8 +1518,6 @@ mod metrics {
         }
     }
 
-    /// Answers with `session` until `fail` is set, then with a transport
-    /// error. `gate` holds every fetch until a permit is added.
     struct ScriptedFetcher {
         session: Option<ResolvedSession>,
         fail: AtomicBool,

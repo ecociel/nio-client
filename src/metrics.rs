@@ -1,9 +1,7 @@
 //! Prometheus series for the session resolver (`nio_session_resolver_*`) and
-//! the check RPCs (`nio_check_client_*`), ported from nio's `check_client` so
-//! a relying party on either crate exports the same names, labels and
-//! buckets. Behind the `metrics` feature: call `register` once and export
-//! the registry. With the feature off every instrument point compiles to
-//! nothing.
+//! the check RPCs (`nio_check_client_*`), with the same names, labels and
+//! buckets as nio's `check_client`. Behind the `metrics` feature: call
+//! `register` once and export the registry.
 //!
 //! The families are process-global. Registering into a second registry
 //! exports the same counters twice, so register into one registry per
@@ -54,8 +52,8 @@ mod real {
     }
 
     fn rpc_hist() -> Histogram {
-        // 0.25 ms to ~8 s, identical to check's server-side buckets so
-        // client-observed minus server-observed subtracts cleanly.
+        // Identical to check's server-side buckets so client-observed minus
+        // server-observed subtracts cleanly.
         Histogram::new(exponential_buckets(0.00025, 2.0, 16))
     }
 
@@ -63,12 +61,8 @@ mod real {
         static FAMILIES: OnceLock<Families> = OnceLock::new();
         FAMILIES.get_or_init(|| Families {
             resolver_events: Family::default(),
-            // 50 µs to ~6.5 s: the hit path is in-memory, the miss path pays
-            // fetch plus flight wait, and both tails matter.
             resolver_resolve_duration: Histogram::new(exponential_buckets(0.00005, 2.0, 18)),
             resolver_fetch_duration: Family::new_with_constructor(rpc_hist),
-            // 1 s to 128 s: the interesting edge is the L1 TTL bound and
-            // stale-if-error excursions beyond it.
             resolver_served_age: Histogram::new(exponential_buckets(1.0, 2.0, 8)),
             resolver_singleflight: Family::default(),
             resolver_inflight: Gauge::default(),
