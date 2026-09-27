@@ -1,8 +1,3 @@
-//! Live-server integration tests: they connect to a running check at
-//! `NIO_CHECK_URI` and, for sessions, to nio-client at `NIO_SESSION_URI`
-//! (gRPC) and `NIO_BASE_URI` (sign-in pages). Off by default so the test build
-//! stays green without a server. Start the stack with `task stack-up`, then run
-//! `task test-live`.
 #![cfg(feature = "live-tests")]
 
 use std::collections::BTreeSet;
@@ -313,15 +308,19 @@ async fn session_resolve_returns_tenant() {
             ("back", "/"),
         ],
     );
-    assert!(signup.contains("\"ok\":true"), "sign-up answered {signup}");
+    assert!(
+        signup.body.contains("\"ok\":true"),
+        "sign-up answered {signup:?}"
+    );
     let signin = post_form(
         &base,
         "signin",
         "application/vnd.nio.signin-outcome+json",
         &[("email", &email), ("password", password), ("back", "/")],
     );
-    let token = session_cookie(&signin)
-        .unwrap_or_else(|| panic!("sign-in set no session cookie: {signin}"));
+    let token = signin
+        .session_cookie()
+        .unwrap_or_else(|| panic!("sign-in set no session cookie: {signin:?}"));
 
     let channel = connect_channel(env_uri("NIO_SESSION_URI"), None)
         .await
@@ -343,9 +342,26 @@ async fn session_resolve_returns_tenant() {
     assert!(unknown.is_none(), "unknown token resolved to {unknown:?}");
 }
 
-/// Posts a form to `<base>/<path>` over plain HTTP/1.1 and returns the raw
-/// response, headers included, so the caller can read `Set-Cookie`.
-fn post_form(base: &Uri, path: &str, accept: &str, fields: &[(&str, &str)]) -> String {
+#[derive(Debug)]
+struct HttpResponse {
+    head: String,
+    body: String,
+}
+
+impl HttpResponse {
+    fn session_cookie(&self) -> Option<String> {
+        self.head.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if !name.eq_ignore_ascii_case("set-cookie") {
+                return None;
+            }
+            let token = value.trim().strip_prefix("session=")?.split(';').next()?;
+            (!token.is_empty()).then(|| token.to_string())
+        })
+    }
+}
+
+fn post_form(base: &Uri, path: &str, accept: &str, fields: &[(&str, &str)]) -> HttpResponse {
     let authority = base.authority().expect("NIO_BASE_URI has a host").as_str();
     let body = fields
         .iter()
@@ -366,7 +382,13 @@ fn post_form(base: &Uri, path: &str, accept: &str, fields: &[(&str, &str)]) -> S
     stream.write_all(request.as_bytes()).expect("send form");
     let mut response = String::new();
     stream.read_to_string(&mut response).expect("read response");
-    response
+    let (head, body) = response
+        .split_once("\r\n\r\n")
+        .expect("HTTP response has a header block");
+    HttpResponse {
+        head: head.to_string(),
+        body: body.to_string(),
+    }
 }
 
 fn form_encode(value: &str) -> String {
@@ -379,17 +401,6 @@ fn form_encode(value: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
-}
-
-fn session_cookie(response: &str) -> Option<String> {
-    response.lines().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        if !name.eq_ignore_ascii_case("set-cookie") {
-            return None;
-        }
-        let token = value.trim().strip_prefix("session=")?.split(';').next()?;
-        (!token.is_empty()).then(|| token.to_string())
-    })
 }
 
 #[tokio::test]

@@ -51,5 +51,4 @@ todo.md
 /units.tsv
 /ledger.tsv
 
-# SQLite databases of the local nio stack (task stack-up)
 /.nio-data*/
