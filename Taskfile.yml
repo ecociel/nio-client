@@ -91,7 +91,7 @@ tasks:
       - task: test
 
   example-check:
-    desc: "Run the check example: task example-check -- <ns> <obj> <rel> <userid> (needs NIO_CHECK_URI)"
+    desc: "Run the check example: task example-check -- <ns> <obj> <rel> <userid> [zookie] (needs NIO_CHECK_URI)"
     cmds:
       - cargo run --example check -- {{.CLI_ARGS}}
 

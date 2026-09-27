@@ -180,6 +180,11 @@ A [Taskfile](https://taskfile.dev) drives the workflow:
     task ci          # fmt-check + lint + build + test
     task example-check -- customer acme customer.update 42
 
+Without a zookie, `check` evaluates at nio's default snapshot, which can
+trail a write by a moment. To check your own write, pass the `ts=` value
+that `task example-write` prints as the fifth argument of
+`task example-check`.
+
 ## Run the live tests against a local nio stack
 
 `docker-compose.yml` runs nio `check` and `nio-client` on SQLite. It needs
