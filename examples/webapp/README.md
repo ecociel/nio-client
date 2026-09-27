@@ -140,7 +140,7 @@ Run the app and keep its terminal visible — the `[nio session]` and
 
 ```
 curl -si http://127.0.0.1:8080/articles/1 | grep -i location
-#   location: /signin?back=%2Farticles%2F1
+#   location: /signin?back=/articles/1
 ```
 
 No cookie → the extractor rejects with `SigninRedirect`, redirecting to
